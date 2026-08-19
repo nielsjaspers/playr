@@ -53,6 +53,13 @@ function wait(milliseconds: number) {
   return new Promise<void>((resolve) => setTimeout(resolve, milliseconds));
 }
 
+function formatPresentedError(message: string) {
+  if (message.includes('database is locked') || message.includes('SQLiteErrorException')) {
+    return 'Playr could not finish saving your library. Please try again.';
+  }
+  return message;
+}
+
 export default function PlayrApp() {
   const isDark = useColorScheme() === 'dark';
   const viewport = useWindowDimensions();
@@ -147,7 +154,7 @@ export default function PlayrApp() {
     const isRemovalFailure = presentedError.includes('still downloaded');
     Alert.alert(
       isRemovalFailure ? 'Couldn’t Remove Download' : 'Playr Couldn’t Complete That',
-      presentedError,
+      formatPresentedError(presentedError),
       [
         {
           text: 'OK',
@@ -604,17 +611,8 @@ export default function PlayrApp() {
       keepDownloads: false,
       rememberTimestamps: true,
     };
-    const foldersWithoutRememberedTimestamps = new Set(
-      [...library.folderPreferencesByPath]
-        .filter(([, preferences]) => !preferences.rememberTimestamps)
-        .map(([path]) => path),
-    );
     const continueListeningFiles = currentFolderPath === ROOT_FOLDER_PATH
-      ? getContinueListeningFiles(
-          library.files,
-          library.progressById,
-          foldersWithoutRememberedTimestamps,
-        )
+      ? getContinueListeningFiles(library.files, library.progressById)
       : [];
     const searchResults = searchAudioTitles(
       library.files,

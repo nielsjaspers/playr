@@ -94,12 +94,20 @@ describe('library organization', () => {
     ]);
   });
 
-  test('continue listening excludes folders that do not remember timestamps', () => {
-    const track = file('music/track.mp3');
+  test('continue listening keeps only the latest item from each folder', () => {
+    const olderTrack = file('music/older.mp3');
+    const latestTrack = file('music/latest.mp3');
+    const podcast = file('podcasts/episode.mp3');
     const progress = new Map([
-      [track.id, { fileId: track.id, position: 12, duration: 100, completedAt: null, updatedAt: 1 }],
+      [olderTrack.id, { fileId: olderTrack.id, position: 12, duration: 100, completedAt: null, updatedAt: 1 }],
+      [latestTrack.id, { fileId: latestTrack.id, position: 0, duration: 100, completedAt: null, updatedAt: 3 }],
+      [podcast.id, { fileId: podcast.id, position: 20, duration: 100, completedAt: null, updatedAt: 2 }],
     ]);
 
-    expect(getContinueListeningFiles([track], progress, new Set(['music']))).toEqual([]);
+    expect(
+      getContinueListeningFiles([olderTrack, latestTrack, podcast], progress).map(
+        (item) => item.id,
+      ),
+    ).toEqual([latestTrack.id, podcast.id]);
   });
 });

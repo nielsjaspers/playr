@@ -156,14 +156,23 @@ export function searchAudioTitles(
 export function getContinueListeningFiles(
   files: ICloudAudioFile[],
   progressById: Map<string, PlaybackProgress>,
-  foldersWithoutRememberedTimestamps: Set<string> = new Set(),
 ) {
-  return files
-    .filter((file) => {
-      if (foldersWithoutRememberedTimestamps.has(parentFolderPath(file.relativePath))) return false;
-      const progress = progressById.get(file.id);
-      return progress != null && progress.position > 0 && progress.completedAt == null;
-    })
+  const latestByFolder = new Map<string, ICloudAudioFile>();
+  for (const file of files) {
+    const progress = progressById.get(file.id);
+    if (!progress || progress.completedAt != null) continue;
+
+    const folderPath = parentFolderPath(file.relativePath);
+    const current = latestByFolder.get(folderPath);
+    if (
+      !current ||
+      progress.updatedAt > (progressById.get(current.id)?.updatedAt ?? 0)
+    ) {
+      latestByFolder.set(folderPath, file);
+    }
+  }
+
+  return [...latestByFolder.values()]
     .sort(
       (left, right) =>
         (progressById.get(right.id)?.updatedAt ?? 0) -

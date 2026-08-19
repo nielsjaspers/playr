@@ -54,6 +54,7 @@ export function usePlayback({
   const completedAtRef = useRef<number | null>(null);
   const rememberTimestampRef = useRef(true);
   const lastSavedSecondRef = useRef(0);
+  const lastStartedFileIdRef = useRef<string | null>(null);
   const finishGateRef = useRef<FinishGate | null>(null);
   const onFinishedRef = useRef(onFinished);
 
@@ -87,11 +88,43 @@ export function usePlayback({
     });
   }, [onError]);
 
+  const persistProgress = useCallback(
+    async (progress: PlaybackProgress) => {
+      try {
+        await onProgress(progress);
+      } catch {
+        // Persistence must never stop or interrupt audio playback.
+      }
+    },
+    [onProgress],
+  );
+
+  useEffect(() => {
+    if (
+      !currentFile ||
+      !status.isLoaded ||
+      status.duration <= 0 ||
+      finishGateRef.current?.fileId !== currentFile.id ||
+      !finishGateRef.current.armed ||
+      lastStartedFileIdRef.current === currentFile.id
+    ) {
+      return;
+    }
+    lastStartedFileIdRef.current = currentFile.id;
+    void persistProgress({
+      fileId: currentFile.id,
+      position: rememberTimestampRef.current ? status.currentTime : 0,
+      duration: status.duration,
+      completedAt: null,
+      updatedAt: Date.now(),
+    });
+  }, [currentFile, persistProgress, status.currentTime, status.duration, status.isLoaded]);
+
   const saveCurrent = useCallback(
     async (position = statusRef.current.currentTime, duration = statusRef.current.duration) => {
       const file = currentFileRef.current;
       if (!file || duration <= 0) return;
-      await onProgress({
+      await persistProgress({
         fileId: file.id,
         position: rememberTimestampRef.current ? position : 0,
         duration,
@@ -99,7 +132,24 @@ export function usePlayback({
         updatedAt: Date.now(),
       });
     },
-    [onProgress],
+    [persistProgress],
+  );
+
+  const completePlayback = useCallback(
+    (file: ICloudAudioFile, duration: number) => {
+      playingRef.current = false;
+      const completedAt = Date.now();
+      completedAtRef.current = completedAt;
+      void persistProgress({
+        fileId: file.id,
+        position: duration,
+        duration,
+        completedAt,
+        updatedAt: completedAt,
+      });
+      onFinishedRef.current(file.id);
+    },
+    [persistProgress],
   );
 
   useEffect(() => {
@@ -126,20 +176,10 @@ export function usePlayback({
     });
     finishGateRef.current = result.gate;
     if (!result.shouldFinish) return;
-    playingRef.current = false;
-    const completedAt = Date.now();
-    completedAtRef.current = completedAt;
-    void onProgress({
-      fileId: currentFile.id,
-      position: status.duration,
-      duration: status.duration,
-      completedAt,
-      updatedAt: completedAt,
-    });
-    onFinishedRef.current(currentFile.id);
+    completePlayback(currentFile, status.duration);
   }, [
+    completePlayback,
     currentFile,
-    onProgress,
     status.currentTime,
     status.didJustFinish,
     status.duration,
@@ -162,7 +202,7 @@ export function usePlayback({
     finishGateRef.current = { fileId: file.id, armed: true, handled: false };
     lastSavedSecondRef.current = 0;
     await playerRef.current.seekTo(0);
-    await onProgress({
+    void persistProgress({
       fileId: file.id,
       position: 0,
       duration,
@@ -171,7 +211,7 @@ export function usePlayback({
     });
     playerRef.current.play();
     playingRef.current = true;
-  }, [onProgress]);
+  }, [persistProgress]);
 
   const play = useCallback(
     async (file: ICloudAudioFile, options: PlayOptions = {}) => {
@@ -203,6 +243,7 @@ export function usePlayback({
 
       currentFileRef.current = file;
       setCurrentFile(file);
+      lastStartedFileIdRef.current = null;
       completedAtRef.current = null;
       rememberTimestampRef.current = rememberTimestamp;
       lastSavedSecondRef.current = Math.floor(resumeAt);
@@ -217,12 +258,17 @@ export function usePlayback({
 
       if (resumeAt > 0) await activePlayer.seekTo(resumeAt);
       if (isReplay && storedProgress) {
-        await onProgress({ ...storedProgress, position: 0, completedAt: null, updatedAt: Date.now() });
+        void persistProgress({
+          ...storedProgress,
+          position: 0,
+          completedAt: null,
+          updatedAt: Date.now(),
+        });
       }
       activePlayer.play();
       playingRef.current = true;
     },
-    [onError, onProgress, progressById, replay, saveCurrent],
+    [onError, persistProgress, progressById, replay, saveCurrent],
   );
 
   const toggle = useCallback(() => {
@@ -256,14 +302,29 @@ export function usePlayback({
   );
 
   const skip = useCallback(
-    (seconds: number) => seekTo(statusRef.current.currentTime + seconds),
-    [seekTo],
+    async (seconds: number) => {
+      const activeStatus = statusRef.current;
+      const file = currentFileRef.current;
+      const target = activeStatus.currentTime + seconds;
+      if (file && seconds > 0 && activeStatus.duration > 0 && target >= activeStatus.duration) {
+        const gate = finishGateRef.current;
+        if (gate && !gate.handled) {
+          finishGateRef.current = { ...gate, armed: true, handled: true };
+          await playerRef.current.seekTo(activeStatus.duration);
+          completePlayback(file, activeStatus.duration);
+          return;
+        }
+      }
+      await seekTo(target);
+    },
+    [completePlayback, seekTo],
   );
 
   const stop = useCallback(async () => {
     await saveCurrent();
     playingRef.current = false;
     currentFileRef.current = null;
+    lastStartedFileIdRef.current = null;
     finishGateRef.current = null;
     setCurrentFile(null);
 

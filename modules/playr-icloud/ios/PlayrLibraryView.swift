@@ -374,7 +374,7 @@ public struct PlayrLibraryView: ExpoSwiftUI.View, ExpoSwiftUI.WithHostingView {
     NavigationStack {
       dragEnabledList
         .navigationTitle(props.title)
-        .navigationBarTitleDisplayMode(.large)
+        .navigationBarTitleDisplayMode(props.currentFolderPath.isEmpty ? .large : .inline)
         .searchable(
           text: $searchText,
           placement: .navigationBarDrawer(displayMode: .always),
@@ -441,10 +441,18 @@ public struct PlayrLibraryView: ExpoSwiftUI.View, ExpoSwiftUI.WithHostingView {
         folderSection
         audioSection
       }
+      bottomClearance
     }
     .listStyle(.plain)
     .scrollContentBackground(.hidden)
     .background(Color(uiColor: .systemBackground))
+  }
+
+  private var bottomClearance: some View {
+    Color.clear
+      .frame(height: props.currentFileId == nil ? 96 : 220)
+      .listRowInsets(EdgeInsets())
+      .listRowSeparator(.hidden)
   }
 
   private var isSearching: Bool {
@@ -483,10 +491,6 @@ public struct PlayrLibraryView: ExpoSwiftUI.View, ExpoSwiftUI.WithHostingView {
           .textCase(nil)
       }
 
-      Divider()
-        .padding(.vertical, 6)
-        .listRowInsets(EdgeInsets(top: 0, leading: 16, bottom: 0, trailing: 16))
-        .listRowSeparator(.hidden)
     }
   }
 

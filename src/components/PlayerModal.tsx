@@ -16,6 +16,7 @@ import { GlassIconButton, Icon, type Palette } from '../ui';
 import type { usePlayback } from '../usePlayback';
 import { formatDuration } from './EpisodeRow';
 import { getPlayerLayout } from './playerLayout';
+import { getHorizontalSwipeDirection } from './swipeNavigation';
 import type { RepeatMode } from '../playbackSequence';
 
 type PlaybackController = ReturnType<typeof usePlayback>;
@@ -98,25 +99,43 @@ export function PlayerModal({
   const viewport = useWindowDimensions();
   const layout = getPlayerLayout(viewport.width, viewport.height);
   const artworkTranslation = useRef(new Animated.Value(0)).current;
+  const onNextRef = useRef(onNext);
+  const onPreviousRef = useRef(onPrevious);
+  const viewportWidthRef = useRef(viewport.width);
+
+  onNextRef.current = onNext;
+  onPreviousRef.current = onPrevious;
+  viewportWidthRef.current = viewport.width;
+
   const artworkPanResponder = useMemo(
     () =>
       PanResponder.create({
+        onStartShouldSetPanResponder: () => true,
+        onStartShouldSetPanResponderCapture: () => true,
         onMoveShouldSetPanResponder: (_, gesture) =>
-          Math.abs(gesture.dx) > 12 && Math.abs(gesture.dx) > Math.abs(gesture.dy),
+          Math.abs(gesture.dx) > 4 && Math.abs(gesture.dx) > Math.abs(gesture.dy) * 0.75,
+        onMoveShouldSetPanResponderCapture: (_, gesture) =>
+          Math.abs(gesture.dx) > 4 && Math.abs(gesture.dx) > Math.abs(gesture.dy) * 0.75,
+        onPanResponderGrant: () => {
+          artworkTranslation.stopAnimation();
+        },
         onPanResponderMove: (_, gesture) => {
-          artworkTranslation.setValue(gesture.dx * 0.65);
+          artworkTranslation.setValue(gesture.dx);
         },
         onPanResponderRelease: (_, gesture) => {
-          const navigate = gesture.dx <= -64
-            ? onNext
-            : gesture.dx >= 64
-              ? onPrevious
+          const direction = getHorizontalSwipeDirection(gesture.dx, gesture.dy, gesture.vx);
+          const navigate = direction === 'next'
+            ? onNextRef.current
+            : direction === 'previous'
+              ? onPreviousRef.current
               : null;
           if (navigate) {
-            const exitPosition = gesture.dx < 0 ? -viewport.width : viewport.width;
+            const exitPosition = direction === 'next'
+              ? -viewportWidthRef.current
+              : viewportWidthRef.current;
             Animated.timing(artworkTranslation, {
               toValue: exitPosition,
-              duration: 170,
+              duration: 120,
               useNativeDriver: true,
             }).start(({ finished }) => {
               if (!finished) return;
@@ -147,14 +166,17 @@ export function PlayerModal({
             useNativeDriver: true,
           }).start();
         },
+        onPanResponderTerminationRequest: () => false,
+        onShouldBlockNativeResponder: () => true,
       }),
-    [artworkTranslation, onNext, onPrevious, viewport.width],
+    [artworkTranslation],
   );
 
   return (
     <Modal
+      allowSwipeDismissal={false}
       animationType="slide"
-      onRequestClose={onClose}
+      onRequestClose={() => undefined}
       presentationStyle="pageSheet"
       visible={isVisible && playback.currentFile != null}
     >
