@@ -22,6 +22,12 @@ private struct ICloudFileOperationRecord: Record {
   @Field var error: String?
 }
 
+private struct ICloudFolderRecord: Record {
+  @Field var id: String = ""
+  @Field var name: String = ""
+  @Field var relativePath: String = ""
+}
+
 private func makeICloudException(_ description: String) -> Exception {
   Exception(
     name: "PlayrICloudException",
@@ -33,6 +39,8 @@ private func makeICloudException(_ description: String) -> Exception {
 public final class PlayrICloudModule: Module {
   public func definition() -> ModuleDefinition {
     Name("PlayrICloud")
+
+    View(PlayrLibraryView.self)
 
     AsyncFunction("getAvailabilityAsync") {
       if FileManager.default.ubiquityIdentityToken == nil {
@@ -59,6 +67,48 @@ public final class PlayrICloudModule: Module {
 
     AsyncFunction("listAudioFilesAsync") {
       try self.listAudioFiles()
+    }
+
+    AsyncFunction("listFoldersAsync") {
+      try self.listFolders()
+    }
+
+    AsyncFunction("createFolderAsync") { (parentPath: String, name: String) in
+      let parentURL = try self.folderURL(for: parentPath)
+      let folderName = try self.validatedFolderName(name)
+      let folderURL = parentURL.appendingPathComponent(folderName, isDirectory: true)
+      try self.ensureAvailableDestination(folderURL)
+      try FileManager.default.createDirectory(at: folderURL, withIntermediateDirectories: false)
+      return try self.folderRecord(for: folderURL)
+    }
+
+    AsyncFunction("renameFolderAsync") { (relativePath: String, name: String) in
+      guard !relativePath.isEmpty else {
+        throw makeICloudException("The Playr library folder cannot be renamed.")
+      }
+      let sourceURL = try self.folderURL(for: relativePath)
+      let folderName = try self.validatedFolderName(name)
+      let destinationURL = sourceURL
+        .deletingLastPathComponent()
+        .appendingPathComponent(folderName, isDirectory: true)
+      try self.ensureAvailableDestination(destinationURL, allowing: sourceURL)
+      if sourceURL.standardizedFileURL != destinationURL.standardizedFileURL {
+        try FileManager.default.moveItem(at: sourceURL, to: destinationURL)
+      }
+      return try self.folderRecord(for: destinationURL)
+    }
+
+    AsyncFunction("moveAudioFileAsync") { (id: String, destinationFolderPath: String) in
+      let sourceURL = try self.audioURL(for: id)
+      let destinationFolderURL = try self.folderURL(for: destinationFolderPath)
+      let destinationURL = destinationFolderURL.appendingPathComponent(sourceURL.lastPathComponent)
+      try self.ensureAvailableDestination(destinationURL, allowing: sourceURL)
+      if sourceURL.standardizedFileURL != destinationURL.standardizedFileURL {
+        try FileManager.default.moveItem(at: sourceURL, to: destinationURL)
+      }
+      let destinationPath = try self.relativePath(for: destinationURL)
+      return (try? self.audioFileRecord(for: destinationPath))
+        ?? self.fallbackAudioFileRecord(for: destinationURL)
     }
 
     AsyncFunction("requestDownloadsAsync") { (ids: [String]) in
@@ -118,23 +168,39 @@ public final class PlayrICloudModule: Module {
 
   private func listAudioFiles() throws -> [ICloudAudioFileRecord] {
     let documentsURL = try documentsURL()
-    let urls = try FileManager.default.contentsOfDirectory(
-      at: documentsURL,
-      includingPropertiesForKeys: nil,
-      options: [.skipsHiddenFiles]
-    )
-
+    let urls = try descendants(of: documentsURL)
     return urls
       .filter { supportedAudioExtensions.contains($0.pathExtension.lowercased()) }
       .map { url in
-        (try? audioFileRecord(for: url.lastPathComponent)) ?? fallbackAudioFileRecord(for: url)
+        let relativePath = (try? self.relativePath(for: url)) ?? url.lastPathComponent
+        return (try? audioFileRecord(for: relativePath)) ?? fallbackAudioFileRecord(for: url)
       }
       .sorted { left, right in
-        if left.modifiedAt == right.modifiedAt {
-          return left.name.localizedStandardCompare(right.name) == .orderedAscending
-        }
-        return (left.modifiedAt ?? 0) > (right.modifiedAt ?? 0)
+        left.relativePath.localizedStandardCompare(right.relativePath) == .orderedAscending
       }
+  }
+
+  private func listFolders() throws -> [ICloudFolderRecord] {
+    let documentsURL = try documentsURL()
+    return try descendants(of: documentsURL)
+      .filter { url in
+        (try? url.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true
+      }
+      .compactMap { try? folderRecord(for: $0) }
+      .sorted {
+        $0.relativePath.localizedStandardCompare($1.relativePath) == .orderedAscending
+      }
+  }
+
+  private func descendants(of rootURL: URL) throws -> [URL] {
+    guard let enumerator = FileManager.default.enumerator(
+      at: rootURL,
+      includingPropertiesForKeys: [.isDirectoryKey],
+      options: [.skipsHiddenFiles, .skipsPackageDescendants]
+    ) else {
+      return []
+    }
+    return enumerator.compactMap { $0 as? URL }
   }
 
   private func documentsURL() throws -> URL {
@@ -177,6 +243,74 @@ public final class PlayrICloudModule: Module {
     return candidate
   }
 
+  private func folderURL(for relativePath: String) throws -> URL {
+    let documentsURL = try documentsURL().standardizedFileURL
+    guard !relativePath.hasPrefix("/") else {
+      throw makeICloudException("The selected folder path is invalid.")
+    }
+    let candidate = relativePath.isEmpty
+      ? documentsURL
+      : documentsURL.appendingPathComponent(relativePath, isDirectory: true).standardizedFileURL
+    let rootPrefix = documentsURL.path.hasSuffix("/")
+      ? documentsURL.path
+      : documentsURL.path + "/"
+    guard candidate == documentsURL || candidate.path.hasPrefix(rootPrefix) else {
+      throw makeICloudException("The selected folder path is invalid.")
+    }
+    var isDirectory: ObjCBool = false
+    guard
+      FileManager.default.fileExists(atPath: candidate.path, isDirectory: &isDirectory),
+      isDirectory.boolValue
+    else {
+      throw makeICloudException("The selected folder no longer exists.")
+    }
+    return candidate
+  }
+
+  private func relativePath(for url: URL) throws -> String {
+    let documentsURL = try documentsURL().standardizedFileURL
+    let candidate = url.standardizedFileURL
+    let rootPrefix = documentsURL.path.hasSuffix("/")
+      ? documentsURL.path
+      : documentsURL.path + "/"
+    guard candidate.path.hasPrefix(rootPrefix) else {
+      throw makeICloudException("The selected item is outside the Playr library.")
+    }
+    return String(candidate.path.dropFirst(rootPrefix.count))
+  }
+
+  private func validatedFolderName(_ name: String) throws -> String {
+    let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
+    let invalidCharacters = CharacterSet(charactersIn: "/:").union(.controlCharacters)
+    guard
+      !trimmedName.isEmpty,
+      trimmedName != ".",
+      trimmedName != "..",
+      trimmedName.rangeOfCharacter(from: invalidCharacters) == nil
+    else {
+      throw makeICloudException("Enter a folder name without slashes or colons.")
+    }
+    return trimmedName
+  }
+
+  private func ensureAvailableDestination(_ destinationURL: URL, allowing sourceURL: URL? = nil) throws {
+    if sourceURL?.standardizedFileURL == destinationURL.standardizedFileURL {
+      return
+    }
+    guard !FileManager.default.fileExists(atPath: destinationURL.path) else {
+      throw makeICloudException("An item with that name already exists in this folder.")
+    }
+  }
+
+  private func folderRecord(for url: URL) throws -> ICloudFolderRecord {
+    let relativePath = try self.relativePath(for: url)
+    var record = ICloudFolderRecord()
+    record.id = relativePath
+    record.name = url.lastPathComponent
+    record.relativePath = relativePath
+    return record
+  }
+
   private func audioFileRecord(for relativePath: String) throws -> ICloudAudioFileRecord {
     let url = try audioURL(for: relativePath)
     let values = try url.resourceValues(forKeys: [
@@ -211,10 +345,11 @@ public final class PlayrICloudModule: Module {
   }
 
   private func fallbackAudioFileRecord(for url: URL) -> ICloudAudioFileRecord {
+    let relativePath = (try? self.relativePath(for: url)) ?? url.lastPathComponent
     var record = ICloudAudioFileRecord()
-    record.id = url.lastPathComponent
+    record.id = relativePath
     record.name = url.deletingPathExtension().lastPathComponent
-    record.relativePath = url.lastPathComponent
+    record.relativePath = relativePath
     record.downloadState = "inCloud"
     record.metadataAvailable = false
     return record

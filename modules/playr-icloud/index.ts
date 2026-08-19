@@ -2,3 +2,4 @@
 // and on native platforms to PlayrICloudModule.ts
 export { default } from './src/PlayrICloudModule';
 export * from './src/PlayrICloud.types';
+export * from './src/PlayrLibraryView';

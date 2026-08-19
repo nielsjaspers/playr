@@ -4,18 +4,33 @@ import { AppState, type AppStateStatus } from 'react-native';
 import PlayrICloud, {
   type ICloudAudioFile,
   type ICloudAvailability,
+  type ICloudFolder,
 } from '../modules/playr-icloud';
 import { mergeListedFiles, replaceVerifiedFiles } from './libraryFiles';
+import {
+  buildItemsByParent,
+  reconcileLibraryOrder,
+  remapLibraryOrderPaths,
+  reorderFolderFiles,
+  type LibraryOrder,
+} from './libraryOrganization';
 import { formatRemovalFailure, removeDownloadsWithLockRetry } from './removal';
 import {
   addToQueue as persistQueueItem,
   clearQueue as persistQueueClear,
   getCachedLibrary,
+  getLibraryOrder,
   getOverdueCompletedIds,
   getPlaybackProgress,
   getQueueIds,
+  getReversedFolderPaths,
+  remapFolderPathPrefix,
+  remapPlaybackFileId,
   removeFromQueue as persistQueueRemoval,
   replaceLibraryCache,
+  replaceLibraryOrder,
+  replaceReversedFolderPaths,
+  saveFolderOrderReversed,
   savePlaybackProgress,
   type PlaybackProgress,
 } from './storage';
@@ -30,6 +45,9 @@ function wait(milliseconds: number) {
 
 export function usePlayrLibrary() {
   const [files, setFiles] = useState<ICloudAudioFile[]>([]);
+  const [folders, setFolders] = useState<ICloudFolder[]>([]);
+  const [orderByFolder, setOrderByFolder] = useState<LibraryOrder>(new Map());
+  const [reversedFolderPaths, setReversedFolderPaths] = useState<Set<string>>(new Set());
   const [progressById, setProgressById] = useState<Map<string, PlaybackProgress>>(new Map());
   const [queueIds, setQueueIds] = useState<string[]>([]);
   const [availability, setAvailability] = useState<ICloudAvailability>('available');
@@ -38,16 +56,41 @@ export function usePlayrLibrary() {
   const [error, setError] = useState<string | null>(null);
   const [removingIds, setRemovingIds] = useState<Set<string>>(new Set());
   const filesRef = useRef(files);
+  const foldersRef = useRef(folders);
+  const orderRef = useRef(orderByFolder);
   const hasInitialized = useRef(false);
 
   useEffect(() => {
     filesRef.current = files;
   }, [files]);
 
+  useEffect(() => {
+    foldersRef.current = folders;
+  }, [folders]);
+
+  useEffect(() => {
+    orderRef.current = orderByFolder;
+  }, [orderByFolder]);
+
   const applyFiles = useCallback((nextFiles: ICloudAudioFile[]) => {
     filesRef.current = nextFiles;
     setFiles(nextFiles);
   }, []);
+
+  const applyOrganization = useCallback(
+    async (nextFiles: ICloudAudioFile[], nextFolders: ICloudFolder[]) => {
+      const nextOrder = reconcileLibraryOrder(
+        orderRef.current,
+        buildItemsByParent(nextFiles, nextFolders),
+      );
+      foldersRef.current = nextFolders;
+      orderRef.current = nextOrder;
+      setFolders(nextFolders);
+      setOrderByFolder(nextOrder);
+      await replaceLibraryOrder(nextOrder);
+    },
+    [],
+  );
 
   const removeOverdueDownloads = useCallback(
     async (currentFiles: ICloudAudioFile[]) => {
@@ -89,13 +132,15 @@ export function usePlayrLibrary() {
       if (nextAvailability !== 'available') return;
 
       await PlayrICloud.ensureLibraryAsync();
-      const listedFiles = mergeListedFiles(
-        filesRef.current,
-        await PlayrICloud.listAudioFilesAsync(),
-      );
+      const [nativeFiles, nextFolders] = await Promise.all([
+        PlayrICloud.listAudioFilesAsync(),
+        PlayrICloud.listFoldersAsync(),
+      ]);
+      const listedFiles = mergeListedFiles(filesRef.current, nativeFiles);
       const cleanedFiles = await removeOverdueDownloads(listedFiles);
       applyFiles(cleanedFiles);
       await replaceLibraryCache(cleanedFiles);
+      await applyOrganization(cleanedFiles, nextFolders);
       setError(null);
     } catch (caughtError) {
       setError(caughtError instanceof Error ? caughtError.message : 'The library could not refresh.');
@@ -103,22 +148,27 @@ export function usePlayrLibrary() {
       setIsRefreshing(false);
       setIsLoading(false);
     }
-  }, [applyFiles, removeOverdueDownloads]);
+  }, [applyFiles, applyOrganization, removeOverdueDownloads]);
 
   useEffect(() => {
     let isMounted = true;
 
     async function initialize() {
-      const [cachedFiles, storedProgress, storedQueue] = await Promise.all([
+      const [cachedFiles, storedProgress, storedQueue, storedOrder, storedReversedPaths] = await Promise.all([
         getCachedLibrary(),
         getPlaybackProgress(),
         getQueueIds(),
+        getLibraryOrder(),
+        getReversedFolderPaths(),
       ]);
       if (!isMounted) return;
 
       applyFiles(cachedFiles);
       setProgressById(storedProgress);
       setQueueIds(storedQueue);
+      orderRef.current = storedOrder;
+      setOrderByFolder(storedOrder);
+      setReversedFolderPaths(storedReversedPaths);
       hasInitialized.current = true;
       await refresh();
     }
@@ -225,6 +275,105 @@ export function usePlayrLibrary() {
     }
   }, [applyFiles]);
 
+  const createFolder = useCallback(async (parentPath: string, name: string) => {
+    setError(null);
+    try {
+      const folder = await PlayrICloud.createFolderAsync(parentPath, name);
+      const nextFolders = [...foldersRef.current, folder];
+      await applyOrganization(filesRef.current, nextFolders);
+      return folder;
+    } catch (caughtError) {
+      const message = caughtError instanceof Error ? caughtError.message : 'The folder could not be created.';
+      setError(message);
+      throw caughtError;
+    }
+  }, [applyOrganization]);
+
+  const renameFolder = useCallback(async (relativePath: string, name: string) => {
+    setError(null);
+    try {
+      const renamedFolder = await PlayrICloud.renameFolderAsync(relativePath, name);
+      const remappedOrder = remapLibraryOrderPaths(
+        orderRef.current,
+        relativePath,
+        renamedFolder.relativePath,
+      );
+      orderRef.current = remappedOrder;
+      setOrderByFolder(remappedOrder);
+      const remapPath = (path: string) =>
+        path === relativePath || path.startsWith(`${relativePath}/`)
+          ? `${renamedFolder.relativePath}${path.slice(relativePath.length)}`
+          : path;
+      const remappedReversedPaths = new Set([...reversedFolderPaths].map(remapPath));
+      setReversedFolderPaths(remappedReversedPaths);
+      await replaceLibraryOrder(remappedOrder);
+      await replaceReversedFolderPaths(remappedReversedPaths);
+      await remapFolderPathPrefix(relativePath, renamedFolder.relativePath);
+      const [storedProgress, storedQueue] = await Promise.all([
+        getPlaybackProgress(),
+        getQueueIds(),
+      ]);
+      setProgressById(storedProgress);
+      setQueueIds(storedQueue);
+      await refresh();
+      return renamedFolder;
+    } catch (caughtError) {
+      const message = caughtError instanceof Error ? caughtError.message : 'The folder could not be renamed.';
+      setError(message);
+      throw caughtError;
+    }
+  }, [refresh, reversedFolderPaths]);
+
+  const moveFile = useCallback(async (id: string, destinationFolderPath: string) => {
+    setError(null);
+    try {
+      const movedFile = await PlayrICloud.moveAudioFileAsync(id, destinationFolderPath);
+      await remapPlaybackFileId(id, movedFile.id);
+      setProgressById((current) => {
+        const progress = current.get(id);
+        if (!progress) return current;
+        const next = new Map(current);
+        next.delete(id);
+        next.set(movedFile.id, { ...progress, fileId: movedFile.id });
+        return next;
+      });
+      setQueueIds((current) => current.map((fileId) => (fileId === id ? movedFile.id : fileId)));
+      const nextFiles = filesRef.current.map((file) => (file.id === id ? movedFile : file));
+      applyFiles(nextFiles);
+      await replaceLibraryCache(nextFiles);
+      await applyOrganization(nextFiles, foldersRef.current);
+      return movedFile;
+    } catch (caughtError) {
+      const message = caughtError instanceof Error ? caughtError.message : 'The audio file could not be moved.';
+      setError(message);
+      throw caughtError;
+    }
+  }, [applyFiles, applyOrganization]);
+
+  const toggleFolderOrder = useCallback(async (parentPath: string) => {
+    let nextValue = false;
+    setReversedFolderPaths((current) => {
+      const next = new Set(current);
+      nextValue = !next.has(parentPath);
+      if (nextValue) next.add(parentPath);
+      else next.delete(parentPath);
+      return next;
+    });
+    await saveFolderOrderReversed(parentPath, nextValue);
+  }, []);
+
+  const reorderFiles = useCallback(async (parentPath: string, displayedFileIds: string[]) => {
+    const nextOrder = reorderFolderFiles(
+      orderRef.current,
+      parentPath,
+      displayedFileIds,
+      reversedFolderPaths.has(parentPath),
+    );
+    orderRef.current = nextOrder;
+    setOrderByFolder(nextOrder);
+    await replaceLibraryOrder(nextOrder);
+  }, [reversedFolderPaths]);
+
   const updateProgress = useCallback(async (nextProgress: PlaybackProgress) => {
     setProgressById((current) => new Map(current).set(nextProgress.fileId, nextProgress));
     await savePlaybackProgress(nextProgress);
@@ -250,6 +399,9 @@ export function usePlayrLibrary() {
 
   return {
     files,
+    folders,
+    orderByFolder,
+    reversedFolderPaths,
     progressById,
     queueIds,
     availability,
@@ -262,6 +414,11 @@ export function usePlayrLibrary() {
     verifyFile,
     download,
     removeDownloads,
+    createFolder,
+    renameFolder,
+    moveFile,
+    reorderFiles,
+    toggleFolderOrder,
     updateProgress,
     addToQueue,
     removeFromQueue,

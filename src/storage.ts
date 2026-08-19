@@ -32,6 +32,12 @@ type ProgressRow = {
 
 type QueueRow = { file_id: string };
 
+type OrderRow = {
+  parent_path: string;
+  item_key: string;
+  position: number;
+};
+
 let databasePromise: Promise<SQLiteDatabase> | null = null;
 
 async function getDatabase() {
@@ -67,6 +73,19 @@ async function getDatabase() {
         CREATE TABLE IF NOT EXISTS queue_items (
           file_id TEXT PRIMARY KEY NOT NULL,
           position INTEGER NOT NULL UNIQUE
+        );
+
+        CREATE TABLE IF NOT EXISTS library_order (
+          parent_path TEXT NOT NULL,
+          item_key TEXT NOT NULL,
+          position INTEGER NOT NULL,
+          PRIMARY KEY (parent_path, item_key),
+          UNIQUE (parent_path, position)
+        );
+
+        CREATE TABLE IF NOT EXISTS folder_preferences (
+          parent_path TEXT PRIMARY KEY NOT NULL,
+          is_reversed INTEGER NOT NULL DEFAULT 0
         );
       `);
       return database;
@@ -194,4 +213,116 @@ export async function removeFromQueue(fileId: string) {
 export async function clearQueue() {
   const database = await getDatabase();
   await database.runAsync('DELETE FROM queue_items');
+}
+
+export async function getLibraryOrder() {
+  const database = await getDatabase();
+  const rows = await database.getAllAsync<OrderRow>(
+    'SELECT * FROM library_order ORDER BY parent_path ASC, position ASC',
+  );
+  const order = new Map<string, string[]>();
+  for (const row of rows) {
+    order.set(row.parent_path, [...(order.get(row.parent_path) ?? []), row.item_key]);
+  }
+  return order;
+}
+
+export async function replaceLibraryOrder(order: Map<string, string[]>) {
+  const database = await getDatabase();
+  await database.withExclusiveTransactionAsync(async (transaction) => {
+    await transaction.runAsync('DELETE FROM library_order');
+    for (const [parentPath, itemKeys] of order) {
+      for (const [position, itemKey] of itemKeys.entries()) {
+        await transaction.runAsync(
+          'INSERT INTO library_order (parent_path, item_key, position) VALUES (?, ?, ?)',
+          parentPath,
+          itemKey,
+          position,
+        );
+      }
+    }
+  });
+}
+
+export async function getReversedFolderPaths() {
+  const database = await getDatabase();
+  const rows = await database.getAllAsync<{ parent_path: string }>(
+    'SELECT parent_path FROM folder_preferences WHERE is_reversed = 1',
+  );
+  return new Set(rows.map((row) => row.parent_path));
+}
+
+export async function saveFolderOrderReversed(parentPath: string, reversed: boolean) {
+  const database = await getDatabase();
+  await database.runAsync(
+    `INSERT INTO folder_preferences (parent_path, is_reversed) VALUES (?, ?)
+      ON CONFLICT(parent_path) DO UPDATE SET is_reversed = excluded.is_reversed`,
+    parentPath,
+    reversed ? 1 : 0,
+  );
+}
+
+export async function replaceReversedFolderPaths(parentPaths: Set<string>) {
+  const database = await getDatabase();
+  await database.withExclusiveTransactionAsync(async (transaction) => {
+    await transaction.runAsync('DELETE FROM folder_preferences');
+    for (const parentPath of parentPaths) {
+      await transaction.runAsync(
+        'INSERT INTO folder_preferences (parent_path, is_reversed) VALUES (?, 1)',
+        parentPath,
+      );
+    }
+  });
+}
+
+export async function remapPlaybackFileId(oldId: string, newId: string) {
+  const database = await getDatabase();
+  await database.withExclusiveTransactionAsync(async (transaction) => {
+    await transaction.runAsync(
+      'UPDATE OR REPLACE playback_progress SET file_id = ? WHERE file_id = ?',
+      newId,
+      oldId,
+    );
+    await transaction.runAsync(
+      'UPDATE OR REPLACE queue_items SET file_id = ? WHERE file_id = ?',
+      newId,
+      oldId,
+    );
+  });
+}
+
+export async function remapFolderPathPrefix(oldPath: string, newPath: string) {
+  const database = await getDatabase();
+  const oldPrefix = `${oldPath}/`;
+  const progressRows = await database.getAllAsync<{ file_id: string }>(
+    'SELECT file_id FROM playback_progress WHERE file_id = ? OR substr(file_id, 1, ?) = ?',
+    oldPath,
+    oldPrefix.length,
+    oldPrefix,
+  );
+  const queueRows = await database.getAllAsync<{ file_id: string }>(
+    'SELECT file_id FROM queue_items WHERE file_id = ? OR substr(file_id, 1, ?) = ?',
+    oldPath,
+    oldPrefix.length,
+    oldPrefix,
+  );
+
+  const remap = (path: string) =>
+    path === oldPath ? newPath : `${newPath}/${path.slice(oldPrefix.length)}`;
+  await database.withExclusiveTransactionAsync(async (transaction) => {
+    for (const row of progressRows) {
+      await transaction.runAsync(
+        'UPDATE OR REPLACE playback_progress SET file_id = ? WHERE file_id = ?',
+        remap(row.file_id),
+        row.file_id,
+      );
+    }
+    for (const row of queueRows) {
+      await transaction.runAsync(
+        'UPDATE OR REPLACE queue_items SET file_id = ? WHERE file_id = ?',
+        remap(row.file_id),
+        row.file_id,
+      );
+    }
+  });
 }

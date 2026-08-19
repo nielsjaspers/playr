@@ -15,6 +15,12 @@ export type ICloudAudioFile = {
   metadataAvailable: boolean;
 };
 
+export type ICloudFolder = {
+  id: string;
+  name: string;
+  relativePath: string;
+};
+
 export type ICloudFileOperationResult = {
   id: string;
   succeeded: boolean;

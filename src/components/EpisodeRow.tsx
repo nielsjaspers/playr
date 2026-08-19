@@ -48,6 +48,7 @@ export function EpisodeRow({
   isSelecting,
   isSelected,
   isRemoving,
+  contextLabel,
   onPress,
   onToggleSelection,
 }: {
@@ -59,6 +60,7 @@ export function EpisodeRow({
   isSelecting: boolean;
   isSelected: boolean;
   isRemoving: boolean;
+  contextLabel?: string;
   onPress: () => void;
   onToggleSelection: () => void;
 }) {
@@ -105,7 +107,7 @@ export function EpisodeRow({
           {file.name}
         </Text>
         <Text numberOfLines={1} style={[styles.rowDetail, { color: palette.secondaryLabel }]}>
-          {fileDetail(file, progress, isRemoving)}
+          {contextLabel ? `${contextLabel} · ` : ''}{fileDetail(file, progress, isRemoving)}
         </Text>
         {progressFraction > 0 && progressFraction < 1 ? (
           <View style={[styles.progressTrack, { backgroundColor: palette.fill }]}>

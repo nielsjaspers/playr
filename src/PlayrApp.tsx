@@ -13,9 +13,7 @@ import { StatusBar } from 'expo-status-bar';
 import {
   Button,
   Host,
-  Image,
   List,
-  Menu,
   RNHostView,
   Spacer,
   SwipeActions,
@@ -23,31 +21,32 @@ import {
   VStack,
 } from '@expo/ui/swift-ui';
 import {
-  accessibilityLabel,
-  buttonBorderShape,
-  buttonStyle,
-  controlSize,
-  disabled,
-  fixedSize,
-  foregroundStyle,
   frame,
-  geometryGroup,
   labelStyle,
   listRowBackground,
   listRowInsets,
   listRowSeparator,
   listStyle,
-  menuIndicator,
-  menuOrder,
-  onDisappear,
   scrollContentBackground,
   tabViewStyle,
-  tint,
 } from '@expo/ui/swift-ui/modifiers';
 
-import type { ICloudAudioFile } from '../modules/playr-icloud';
+import {
+  PlayrLibraryView,
+  type ICloudAudioFile,
+  type PlayrLibraryAudioItem,
+} from '../modules/playr-icloud';
 import { EpisodeRow, formatDuration } from './components/EpisodeRow';
 import { PlayerModal } from './components/PlayerModal';
+import {
+  getContinueListeningFiles,
+  isDirectChild,
+  orderFiles,
+  orderFolders,
+  parentFolderPath,
+  ROOT_FOLDER_PATH,
+  searchAudioTitles,
+} from './libraryOrganization';
 import { getEpisodePressIntent } from './playbackIntent';
 import { usePlayback } from './usePlayback';
 import { usePlayrLibrary } from './usePlayrLibrary';
@@ -55,21 +54,13 @@ import { createPalette, GlassPanel, Icon, type Palette } from './ui';
 
 type Screen = 'library' | 'queue';
 
-function EmptyState({ screen, palette }: { screen: Screen; palette: Palette }) {
+function QueueEmptyState({ palette }: { palette: Palette }) {
   return (
     <View style={styles.emptyState}>
-      <Icon
-        name={screen === 'library' ? 'music.note.list' : 'text.badge.plus'}
-        color={palette.tertiaryLabel}
-        size={36}
-      />
-      <Text style={[styles.emptyTitle, { color: palette.label }]}>
-        {screen === 'library' ? 'No audio files' : 'Your queue is empty'}
-      </Text>
+      <Icon name="text.badge.plus" color={palette.tertiaryLabel} size={36} />
+      <Text style={[styles.emptyTitle, { color: palette.label }]}>Your queue is empty</Text>
       <Text style={[styles.emptyBody, { color: palette.secondaryLabel }]}>
-        {screen === 'library'
-          ? 'Add an MP3, M4A, or M4B file to iCloud Drive › Playr.'
-          : 'Add files from your library to play them in order.'}
+        Add files from your library to play them in order.
       </Text>
     </View>
   );
@@ -80,12 +71,12 @@ export default function PlayrApp() {
   const palette = useMemo(() => createPalette(isDark), [isDark]);
   const library = usePlayrLibrary();
   const [screen, setScreen] = useState<Screen>('library');
-  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
-  const [isSelecting, setIsSelecting] = useState(false);
   const [isPlayerOpen, setIsPlayerOpen] = useState(false);
-  const [actionMenuGeneration, setActionMenuGeneration] = useState(0);
   const [notice, setNotice] = useState<string | null>(null);
   const [queueCloudPrompt, setQueueCloudPrompt] = useState<ICloudAudioFile | null>(null);
+  const [currentFolderPath, setCurrentFolderPath] = useState(ROOT_FOLDER_PATH);
+  const [searchQuery, setSearchQuery] = useState('');
+  const [searchGlobally, setSearchGlobally] = useState(false);
   const filesRef = useRef(library.files);
   const queueIdsRef = useRef(library.queueIds);
   const playbackRef = useRef<ReturnType<typeof usePlayback> | null>(null);
@@ -110,12 +101,11 @@ export default function PlayrApp() {
     [library.removeFromQueue],
   );
 
-  const handlePlaybackError = useCallback((message: string) => setNotice(message), []);
   const playback = usePlayback({
     progressById: library.progressById,
     onProgress: library.updateProgress,
     onFinished: handleFinished,
-    onError: handlePlaybackError,
+    onError: setNotice,
   });
   playbackRef.current = playback;
 
@@ -143,8 +133,7 @@ export default function PlayrApp() {
       try {
         const downloadedFiles = await library.download([file.id]);
         const downloadedFile = downloadedFiles.find((item) => item.id === file.id);
-        if (!downloadedFile) return;
-        if (playAfterDownload) await playbackRef.current?.play(downloadedFile);
+        if (downloadedFile && playAfterDownload) await playbackRef.current?.play(downloadedFile);
       } catch (caughtError) {
         setNotice(caughtError instanceof Error ? caughtError.message : 'The download failed.');
       }
@@ -203,18 +192,15 @@ export default function PlayrApp() {
   const addFileToQueue = useCallback(
     async (file: ICloudAudioFile) => {
       await library.addToQueue(file.id);
-      if (file.downloadState === 'inCloud') {
-        Alert.alert(
-          'Added to Queue',
-          'This file is only in iCloud. Download it now, or wait until Playr reaches it?',
-          [
-            { text: 'Later', style: 'cancel' },
-            { text: 'Download', onPress: () => void downloadAndMaybePlay(file, false) },
-          ],
-        );
-      } else {
-        return;
-      }
+      if (file.downloadState !== 'inCloud') return;
+      Alert.alert(
+        'Added to Queue',
+        'This file is only in iCloud. Download it now, or wait until Playr reaches it?',
+        [
+          { text: 'Later', style: 'cancel' },
+          { text: 'Download', onPress: () => void downloadAndMaybePlay(file, false) },
+        ],
+      );
     },
     [downloadAndMaybePlay, library.addToQueue],
   );
@@ -227,58 +213,57 @@ export default function PlayrApp() {
     [library.removeDownloads, playback.currentFile, playback.stop],
   );
 
-  const downloadedIds = library.files
-    .filter((file) => file.downloadState === 'downloaded')
-    .map((file) => file.id);
+  const createFolder = useCallback(
+    (parentPath: string) => {
+      Alert.prompt(
+        'New Folder',
+        'Create a folder in your Playr library.',
+        [
+          { text: 'Cancel', style: 'cancel' },
+          {
+            text: 'Create',
+            onPress: (name?: string) => {
+              if (!name?.trim()) return;
+              void library.createFolder(parentPath, name).catch(() => undefined);
+            },
+          },
+        ],
+        'plain-text',
+      );
+    },
+    [library.createFolder],
+  );
 
-  const confirmRemoveAllDownloads = useCallback(() => {
-    Alert.alert(
-      'Remove All Downloads?',
-      'This removes local copies only. The files remain in iCloud Drive.',
+  const renameCurrentFolder = useCallback(() => {
+    const folder = library.folders.find((item) => item.relativePath === currentFolderPath);
+    if (!folder) return;
+    Alert.prompt(
+      'Rename Folder',
+      undefined,
       [
         { text: 'Cancel', style: 'cancel' },
         {
-          text: 'Remove Downloads',
-          style: 'destructive',
-          onPress: () => void removeFileDownloads(downloadedIds),
+          text: 'Rename',
+          onPress: (name?: string) => {
+            if (!name?.trim()) return;
+            void (async () => {
+              if (
+                playback.currentFile &&
+                (playback.currentFile.relativePath === currentFolderPath ||
+                  playback.currentFile.relativePath.startsWith(`${currentFolderPath}/`))
+              ) {
+                await playback.stop();
+              }
+              const renamedFolder = await library.renameFolder(currentFolderPath, name);
+              setCurrentFolderPath(renamedFolder.relativePath);
+            })().catch(() => undefined);
+          },
         },
       ],
+      'plain-text',
+      folder.name,
     );
-  }, [downloadedIds, removeFileDownloads]);
-
-  const toggleSelection = useCallback((id: string) => {
-    setSelectedIds((current) => {
-      const next = new Set(current);
-      if (next.has(id)) next.delete(id);
-      else next.add(id);
-      return next;
-    });
-  }, []);
-
-  const finishSelecting = useCallback(() => {
-    setIsSelecting(false);
-    setSelectedIds(new Set());
-  }, []);
-
-  const downloadSelected = useCallback(async () => {
-    const ids = [...selectedIds].filter(
-      (id) => library.files.find((file) => file.id === id)?.downloadState === 'inCloud',
-    );
-    if (ids.length > 0) await library.download(ids);
-    finishSelecting();
-  }, [finishSelecting, library.download, library.files, selectedIds]);
-
-  const removeSelected = useCallback(async () => {
-    const ids = [...selectedIds].filter(
-      (id) => library.files.find((file) => file.id === id)?.downloadState === 'downloaded',
-    );
-    if (ids.length > 0) await removeFileDownloads(ids);
-    finishSelecting();
-  }, [finishSelecting, library.files, removeFileDownloads, selectedIds]);
-
-  const resetActionMenu = useCallback(() => {
-    setActionMenuGeneration((generation) => generation + 1);
-  }, []);
+  }, [currentFolderPath, library.folders, library.renameFolder, playback.currentFile, playback.stop]);
 
   const pressEpisode = useCallback(
     (file: ICloudAudioFile) => {
@@ -292,92 +277,101 @@ export default function PlayrApp() {
     [openFile, playback.currentFile?.id, playback.toggle],
   );
 
-  const renderScreen = (targetScreen: Screen) => {
-    const visibleFiles = targetScreen === 'library'
-      ? library.files
-      : library.queueIds
-          .map((id) => library.files.find((file) => file.id === id))
-          .filter((file): file is ICloudAudioFile => file != null);
+  const renderMiniPlayer = () => {
+    if (!playback.currentFile) return null;
+    return (
+      <View style={styles.miniPlayerPosition}>
+        <GlassPanel palette={palette} style={styles.miniPlayer}>
+          <Pressable
+            accessibilityLabel="Open now playing"
+            accessibilityRole="button"
+            onPress={() => setIsPlayerOpen(true)}
+            style={({ pressed }) => [styles.miniOpenArea, { opacity: pressed ? 0.68 : 1 }]}
+          >
+            <View style={[styles.miniArtwork, { backgroundColor: palette.fill }]}>
+              <Icon name="waveform" color={palette.accent} size={22} />
+            </View>
+            <View style={styles.miniText}>
+              <Text numberOfLines={1} style={[styles.miniTitle, { color: palette.label }]}>
+                {playback.currentFile.name}
+              </Text>
+              <Text style={[styles.miniDetail, { color: palette.secondaryLabel }]}>
+                {formatDuration(playback.status.currentTime)} ·{' '}
+                {playback.status.playing ? 'Playing' : 'Paused'}
+              </Text>
+            </View>
+          </Pressable>
+          <Pressable
+            accessibilityLabel={playback.status.playing ? 'Pause' : 'Play'}
+            accessibilityRole="button"
+            hitSlop={8}
+            onPress={playback.toggle}
+            style={({ pressed }) => [styles.miniControl, { opacity: pressed ? 0.55 : 1 }]}
+          >
+            <Icon
+              name={playback.status.playing ? 'pause.fill' : 'play.fill'}
+              color={palette.label}
+              size={23}
+            />
+          </Pressable>
+        </GlassPanel>
+      </View>
+    );
+  };
+
+  const renderLibraryScreen = () => {
+    const currentFolder = library.folders.find(
+      (folder) => folder.relativePath === currentFolderPath,
+    );
+    const isReversed = library.reversedFolderPaths.has(currentFolderPath);
+    const directFiles = orderFiles(
+      library.files.filter((file) => isDirectChild(file.relativePath, currentFolderPath)),
+      currentFolderPath,
+      library.orderByFolder,
+      isReversed,
+    );
+    const childFolders = orderFolders(
+      library.folders.filter((folder) => isDirectChild(folder.relativePath, currentFolderPath)),
+      currentFolderPath,
+      library.orderByFolder,
+      isReversed,
+    );
+    const continueListeningFiles = currentFolderPath === ROOT_FOLDER_PATH
+      ? getContinueListeningFiles(library.files, library.progressById)
+      : [];
+    const searchResults = searchAudioTitles(
+      library.files,
+      searchQuery,
+      currentFolderPath,
+      searchGlobally,
+    );
+
+    const nativeItem = (
+      file: ICloudAudioFile,
+      contextLabel: string | null = null,
+    ): PlayrLibraryAudioItem => {
+      const progress = library.progressById.get(file.id);
+      return {
+        id: file.id,
+        name: file.name,
+        relativePath: file.relativePath,
+        size: file.size,
+        downloadState: file.downloadState,
+        downloadProgress: file.downloadProgress,
+        progressPosition: progress?.position ?? null,
+        progressDuration: progress?.duration ?? null,
+        completedAt: progress?.completedAt ?? null,
+        contextLabel,
+      };
+    };
+
+    const moveFiles = async (ids: string[], destinationFolderPath: string) => {
+      if (playback.currentFile && ids.includes(playback.currentFile.id)) await playback.stop();
+      for (const id of ids) await library.moveFile(id, destinationFolderPath);
+    };
 
     return (
-      <SafeAreaView style={[styles.safeArea, { backgroundColor: palette.background }]}>
-        <View style={styles.headerRow}>
-          <View style={styles.titleRow}>
-            <Text style={[styles.largeTitle, { color: palette.label }]}>
-              {targetScreen === 'library' ? 'Audio' : 'Queue'}
-            </Text>
-            {library.isRefreshing ? (
-              <ActivityIndicator color={palette.secondaryLabel} />
-            ) : null}
-          </View>
-
-          {targetScreen === 'library' ? (
-            <Host
-              colorScheme={isDark ? 'dark' : 'light'}
-              seedColor={palette.label}
-              style={styles.nativeActionHost}
-            >
-              {isSelecting ? (
-                <Button
-                  label="Done selecting"
-                  systemImage="checkmark"
-                  onPress={finishSelecting}
-                  modifiers={[
-                    frame({ width: 44, height: 44 }),
-                    buttonStyle('glass'),
-                    buttonBorderShape('circle'),
-                    controlSize('large'),
-                    labelStyle('iconOnly'),
-                    foregroundStyle(palette.label),
-                  ]}
-                />
-              ) : (
-                <Menu
-                  key={actionMenuGeneration}
-                  label={<Image color={palette.label} size={17} systemName="ellipsis" />}
-                  modifiers={[
-                    buttonStyle('glass'),
-                    buttonBorderShape('circle'),
-                    controlSize('large'),
-                    menuIndicator('hidden'),
-                    menuOrder('fixed'),
-                    fixedSize({ horizontal: true, vertical: true }),
-                    frame({ width: 44, height: 44 }),
-                    geometryGroup(),
-                    foregroundStyle(palette.label),
-                    accessibilityLabel('Library actions'),
-                  ]}
-                >
-                  <Button
-                    label="Select Files"
-                    systemImage="checkmark.circle"
-                    onPress={() => setIsSelecting(true)}
-                    modifiers={[onDisappear(resetActionMenu)]}
-                  />
-                  <Button
-                    label="Remove All Downloads"
-                    systemImage="trash"
-                    role="destructive"
-                    onPress={confirmRemoveAllDownloads}
-                    modifiers={[
-                      disabled(downloadedIds.length === 0 || library.removingIds.size > 0),
-                    ]}
-                  />
-                  <Button
-                    label="Refresh"
-                    systemImage="arrow.clockwise"
-                    onPress={() => void library.refresh()}
-                  />
-                </Menu>
-              )}
-            </Host>
-          ) : library.queueIds.length > 0 ? (
-            <Pressable onPress={() => void library.clearQueue()}>
-              <Text style={[styles.clearButton, { color: palette.destructive }]}>Clear</Text>
-            </Pressable>
-          ) : null}
-        </View>
-
+      <View style={[styles.safeArea, { backgroundColor: palette.background }]}>
         {library.availability !== 'available' ? (
           <View style={styles.icloudUnavailable}>
             <Icon name="icloud.slash" color={palette.secondaryLabel} size={30} />
@@ -390,8 +384,111 @@ export default function PlayrApp() {
           </View>
         ) : library.isLoading ? (
           <ActivityIndicator color={palette.secondaryLabel} style={styles.loading} />
-        ) : visibleFiles.length === 0 ? (
-          <EmptyState palette={palette} screen={targetScreen} />
+        ) : (
+          <PlayrLibraryView
+            continueFiles={continueListeningFiles.map((file) =>
+              nativeItem(file, parentFolderPath(file.relativePath) || 'Library'),
+            )}
+            currentFileId={playback.currentFile?.id ?? null}
+            currentFolderPath={currentFolderPath}
+            directFiles={directFiles.map((file) => nativeItem(file))}
+            folders={childFolders}
+            isPlaying={playback.status.playing}
+            isRefreshing={library.isRefreshing}
+            isReversed={isReversed}
+            onAddToQueue={({ nativeEvent }) => {
+              const file = library.files.find((item) => item.id === nativeEvent.id);
+              if (file) void addFileToQueue(file);
+            }}
+            onBack={() => {
+              setCurrentFolderPath(parentFolderPath(currentFolderPath));
+              setSearchQuery('');
+              setSearchGlobally(false);
+            }}
+            onCreateFolder={() => createFolder(currentFolderPath)}
+            onDownloadFiles={({ nativeEvent }) => {
+              const ids = nativeEvent.ids.filter(
+                (id) => library.files.find((file) => file.id === id)?.downloadState === 'inCloud',
+              );
+              if (ids.length > 0) void library.download(ids);
+            }}
+            onMoveFiles={({ nativeEvent }) => {
+              void moveFiles(nativeEvent.ids, nativeEvent.destinationFolderPath).catch(
+                () => undefined,
+              );
+            }}
+            onOpenFile={({ nativeEvent }) => {
+              const file = library.files.find((item) => item.id === nativeEvent.id);
+              if (file) pressEpisode(file);
+            }}
+            onOpenFolder={({ nativeEvent }) => {
+              setCurrentFolderPath(nativeEvent.path);
+              setSearchQuery('');
+              setSearchGlobally(false);
+            }}
+            onRefresh={() => void library.refresh()}
+            onRemoveAllDownloads={() => {
+              const ids = library.files
+                .filter((file) => file.downloadState === 'downloaded')
+                .map((file) => file.id);
+              if (ids.length > 0) void removeFileDownloads(ids);
+            }}
+            onRemoveDownloads={({ nativeEvent }) => {
+              const ids = nativeEvent.ids.filter(
+                (id) => library.files.find((file) => file.id === id)?.downloadState === 'downloaded',
+              );
+              if (ids.length > 0) void removeFileDownloads(ids);
+            }}
+            onRenameFolder={renameCurrentFolder}
+            onReorderFiles={({ nativeEvent }) => {
+              void library.reorderFiles(currentFolderPath, nativeEvent.ids);
+            }}
+            onSearchChange={({ nativeEvent }) => setSearchQuery(nativeEvent.query)}
+            onSearchScopeChange={({ nativeEvent }) => setSearchGlobally(nativeEvent.global)}
+            onToggleOrder={() => void library.toggleFolderOrder(currentFolderPath)}
+            queuedIds={library.queueIds}
+            removingIds={[...library.removingIds]}
+            searchGlobally={searchGlobally}
+            searchQuery={searchQuery}
+            searchResults={searchResults.map((file) =>
+              nativeItem(file, parentFolderPath(file.relativePath) || 'Library'),
+            )}
+            style={styles.nativeLibraryView}
+            title={currentFolder?.name ?? 'Library'}
+          />
+        )}
+        {renderMiniPlayer()}
+      </View>
+    );
+  };
+
+  const renderQueueScreen = () => {
+    const queueFiles = library.queueIds
+      .map((id) => library.files.find((file) => file.id === id))
+      .filter((file): file is ICloudAudioFile => file != null);
+
+    return (
+      <SafeAreaView style={[styles.safeArea, { backgroundColor: palette.background }]}>
+        <View style={styles.headerRow}>
+          <Text style={[styles.largeTitle, { color: palette.label }]}>Queue</Text>
+          {library.queueIds.length > 0 ? (
+            <Pressable onPress={() => void library.clearQueue()}>
+              <Text style={[styles.clearButton, { color: palette.destructive }]}>Clear</Text>
+            </Pressable>
+          ) : null}
+        </View>
+
+        {library.availability !== 'available' ? (
+          <View style={styles.icloudUnavailable}>
+            <Icon name="icloud.slash" color={palette.secondaryLabel} size={30} />
+            <Text style={[styles.emptyTitle, { color: palette.label }]}>
+              iCloud Drive is unavailable
+            </Text>
+          </View>
+        ) : library.isLoading ? (
+          <ActivityIndicator color={palette.secondaryLabel} style={styles.loading} />
+        ) : queueFiles.length === 0 ? (
+          <QueueEmptyState palette={palette} />
         ) : (
           <Host
             colorScheme={isDark ? 'dark' : 'light'}
@@ -399,8 +496,14 @@ export default function PlayrApp() {
             style={[styles.episodeListHost, { backgroundColor: palette.background }]}
           >
             <List modifiers={[listStyle('plain'), scrollContentBackground('hidden')]}>
-              {visibleFiles.map((item) => {
-                const row = (
+              {queueFiles.map((item) => (
+                <SwipeActions
+                  key={item.id}
+                  modifiers={[
+                    listRowBackground(palette.background),
+                    listRowInsets({ top: 0, leading: 16, bottom: 0, trailing: 16 }),
+                  ]}
+                >
                   <VStack modifiers={[frame({ minHeight: 72 })]}>
                     <RNHostView>
                       <EpisodeRow
@@ -408,68 +511,25 @@ export default function PlayrApp() {
                         isCurrent={playback.currentFile?.id === item.id}
                         isPlaying={playback.status.playing}
                         isRemoving={library.removingIds.has(item.id)}
-                        isSelected={selectedIds.has(item.id)}
-                        isSelecting={isSelecting && targetScreen === 'library'}
+                        isSelected={false}
+                        isSelecting={false}
                         onPress={() => pressEpisode(item)}
-                        onToggleSelection={() => toggleSelection(item.id)}
+                        onToggleSelection={() => undefined}
                         palette={palette}
                         progress={library.progressById.get(item.id)}
                       />
                     </RNHostView>
                   </VStack>
-                );
-                const rowModifiers = [
-                  listRowBackground(palette.background),
-                  listRowInsets({ top: 0, leading: 16, bottom: 0, trailing: 16 }),
-                ];
-
-                if (isSelecting && targetScreen === 'library') {
-                  return (
-                    <VStack key={item.id} modifiers={rowModifiers}>
-                      {row}
-                    </VStack>
-                  );
-                }
-
-                return (
-                  <SwipeActions key={item.id} modifiers={rowModifiers}>
-                    {row}
-                    {targetScreen === 'library' ? (
-                      <SwipeActions.Actions edge="leading" allowsFullSwipe={false}>
-                        <Button
-                          label="Enqueue"
-                          systemImage="text.badge.plus"
-                          modifiers={[tint(palette.label)]}
-                          onPress={() => void addFileToQueue(item)}
-                        />
-                      </SwipeActions.Actions>
-                    ) : null}
-                    <SwipeActions.Actions edge="trailing">
-                        <Button
-                          label="Remove"
-                          systemImage="trash"
-                          role={targetScreen === 'queue' ? 'destructive' : undefined}
-                          modifiers={
-                            targetScreen === 'library'
-                              ? [
-                                  tint(palette.destructive),
-                                  disabled(
-                                    item.downloadState !== 'downloaded' ||
-                                      library.removingIds.has(item.id),
-                                  ),
-                                ]
-                              : undefined
-                          }
-                          onPress={
-                            targetScreen === 'queue'
-                              ? () => void library.removeFromQueue(item.id)
-                              : () => void removeFileDownloads([item.id])
-                          }
-                        />
-                    </SwipeActions.Actions>
-                  </SwipeActions>
-                );
-              })}
+                  <SwipeActions.Actions edge="trailing">
+                    <Button
+                      label="Remove"
+                      systemImage="trash"
+                      role="destructive"
+                      onPress={() => void library.removeFromQueue(item.id)}
+                    />
+                  </SwipeActions.Actions>
+                </SwipeActions>
+              ))}
               <Spacer
                 modifiers={[
                   frame({ height: playback.currentFile ? 104 : 20 }),
@@ -480,63 +540,7 @@ export default function PlayrApp() {
             </List>
           </Host>
         )}
-
-        {targetScreen === 'library' && isSelecting && selectedIds.size > 0 ? (
-          <GlassPanel
-            interactive
-            palette={palette}
-            style={[styles.selectionBar, { bottom: playback.currentFile ? 102 : 18 }]}
-          >
-            <Pressable onPress={() => void downloadSelected()} style={styles.batchAction}>
-              <Icon name="icloud.and.arrow.down" color={palette.label} size={20} />
-              <Text style={[styles.batchText, { color: palette.label }]}>Download</Text>
-            </Pressable>
-            <View style={[styles.verticalSeparator, { backgroundColor: palette.separator }]} />
-            <Pressable onPress={() => void removeSelected()} style={styles.batchAction}>
-              <Icon name="trash" color={palette.destructive} size={19} />
-              <Text style={[styles.batchText, { color: palette.destructive }]}>Remove</Text>
-            </Pressable>
-          </GlassPanel>
-        ) : null}
-
-        {playback.currentFile ? (
-          <View style={styles.miniPlayerPosition}>
-            <GlassPanel palette={palette} style={styles.miniPlayer}>
-              <Pressable
-                accessibilityLabel="Open now playing"
-                accessibilityRole="button"
-                onPress={() => setIsPlayerOpen(true)}
-                style={({ pressed }) => [styles.miniOpenArea, { opacity: pressed ? 0.68 : 1 }]}
-              >
-                <View style={[styles.miniArtwork, { backgroundColor: palette.fill }]}>
-                  <Icon name="waveform" color={palette.accent} size={22} />
-                </View>
-                <View style={styles.miniText}>
-                  <Text numberOfLines={1} style={[styles.miniTitle, { color: palette.label }]}>
-                    {playback.currentFile.name}
-                  </Text>
-                  <Text style={[styles.miniDetail, { color: palette.secondaryLabel }]}>
-                    {formatDuration(playback.status.currentTime)} ·{' '}
-                    {playback.status.playing ? 'Playing' : 'Paused'}
-                  </Text>
-                </View>
-              </Pressable>
-              <Pressable
-                accessibilityLabel={playback.status.playing ? 'Pause' : 'Play'}
-                accessibilityRole="button"
-                hitSlop={8}
-                onPress={playback.toggle}
-                style={({ pressed }) => [styles.miniControl, { opacity: pressed ? 0.55 : 1 }]}
-              >
-                <Icon
-                  name={playback.status.playing ? 'pause.fill' : 'play.fill'}
-                  color={palette.label}
-                  size={23}
-                />
-              </Pressable>
-            </GlassPanel>
-          </View>
-        ) : null}
+        {renderMiniPlayer()}
       </SafeAreaView>
     );
   };
@@ -553,17 +557,15 @@ export default function PlayrApp() {
         <TabView
           selection={screen}
           onSelectionChange={(selection) => {
-            if (selection !== 'library' && selection !== 'queue') return;
-            setScreen(selection);
-            if (selection === 'queue') finishSelecting();
+            if (selection === 'library' || selection === 'queue') setScreen(selection);
           }}
-          modifiers={[tabViewStyle({ type: 'automatic' })]}
+          modifiers={[tabViewStyle({ type: 'automatic' }), labelStyle('iconOnly')]}
         >
-          <TabView.Tab value="library" label="Library" systemImage="music.note.list">
-            <RNHostView>{renderScreen('library')}</RNHostView>
+          <TabView.Tab value="library" systemImage="music.note.list">
+            <RNHostView>{renderLibraryScreen()}</RNHostView>
           </TabView.Tab>
-          <TabView.Tab value="queue" label="Queue" systemImage="text.badge.plus">
-            <RNHostView>{renderScreen('queue')}</RNHostView>
+          <TabView.Tab value="queue" systemImage="text.badge.plus">
+            <RNHostView>{renderQueueScreen()}</RNHostView>
           </TabView.Tab>
         </TabView>
       </Host>
@@ -582,6 +584,7 @@ const styles = StyleSheet.create({
   root: { flex: 1 },
   tabHost: { flex: 1 },
   safeArea: { flex: 1 },
+  nativeLibraryView: { flex: 1 },
   headerRow: {
     alignItems: 'center',
     flexDirection: 'row',
@@ -589,11 +592,8 @@ const styles = StyleSheet.create({
     paddingBottom: 12,
     paddingHorizontal: 16,
     paddingTop: 12,
-    zIndex: 10,
   },
-  titleRow: { alignItems: 'center', flexDirection: 'row', gap: 10 },
   largeTitle: { fontSize: 34, fontWeight: '700', letterSpacing: 0.2 },
-  nativeActionHost: { height: 44, width: 44 },
   episodeListHost: { flex: 1 },
   clearButton: { fontSize: 15, fontWeight: '500' },
   loading: { marginTop: 56 },
@@ -610,12 +610,7 @@ const styles = StyleSheet.create({
     height: 72,
     paddingHorizontal: 10,
   },
-  miniOpenArea: {
-    alignItems: 'center',
-    flex: 1,
-    flexDirection: 'row',
-    minWidth: 0,
-  },
+  miniOpenArea: { alignItems: 'center', flex: 1, flexDirection: 'row', minWidth: 0 },
   miniArtwork: {
     alignItems: 'center',
     borderCurve: 'continuous',
@@ -628,27 +623,4 @@ const styles = StyleSheet.create({
   miniTitle: { fontSize: 15, fontWeight: '600' },
   miniDetail: { fontSize: 12, marginTop: 3 },
   miniControl: { alignItems: 'center', height: 48, justifyContent: 'center', width: 48 },
-  selectionBar: {
-    alignSelf: 'center',
-    borderRadius: 22,
-    flexDirection: 'row',
-    left: 32,
-    overflow: 'hidden',
-    position: 'absolute',
-    right: 32,
-  },
-  batchAction: {
-    alignItems: 'center',
-    flex: 1,
-    flexDirection: 'row',
-    gap: 7,
-    justifyContent: 'center',
-    minHeight: 52,
-  },
-  batchText: { fontSize: 14, fontWeight: '600' },
-  verticalSeparator: {
-    alignSelf: 'stretch',
-    marginVertical: 10,
-    width: StyleSheet.hairlineWidth,
-  },
 });
