@@ -161,7 +161,7 @@ private final class AudioMetadataQuery {
       forAttribute: NSMetadataItemFSContentChangeDateKey
     ) as? Date
 
-    var record = ICloudAudioFileRecord()
+    let record = ICloudAudioFileRecord()
     record.id = relativePath
     record.name = url.deletingPathExtension().lastPathComponent
     record.relativePath = relativePath

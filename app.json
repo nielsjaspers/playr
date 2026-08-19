@@ -41,7 +41,8 @@
           "recordAudioAndroid": false
         }
       ],
-      "expo-sqlite"
+      "expo-sqlite",
+      "./plugins/with-ios-scene-lifecycle"
     ]
   }
 }
