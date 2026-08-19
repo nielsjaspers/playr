@@ -9,6 +9,7 @@ import PlayrICloud, {
 import { mergeListedFiles, replaceVerifiedFiles } from './libraryFiles';
 import {
   buildItemsByParent,
+  parentFolderPath,
   reconcileLibraryOrder,
   remapLibraryOrderPaths,
   reorderFolderFiles,
@@ -19,6 +20,8 @@ import {
   addToQueue as persistQueueItem,
   clearQueue as persistQueueClear,
   getCachedLibrary,
+  getAutoDownloadOnTap,
+  getFolderPreferences,
   getLibraryOrder,
   getOverdueCompletedIds,
   getPlaybackProgress,
@@ -31,14 +34,23 @@ import {
   replaceLibraryOrder,
   replaceQueue,
   replaceReversedFolderPaths,
+  saveAutoDownloadOnTap,
+  saveFolderKeepDownloads,
   saveFolderOrderReversed,
+  saveFolderRememberTimestamps,
   savePlaybackProgress,
+  type FolderPreferences,
   type PlaybackProgress,
 } from './storage';
 
 const COMPLETED_DOWNLOAD_RETENTION_MS = 7 * 24 * 60 * 60 * 1_000;
 const DOWNLOAD_POLL_INTERVAL_MS = 1_000;
 const DOWNLOAD_POLL_LIMIT = 120;
+
+const DEFAULT_FOLDER_PREFERENCES: FolderPreferences = {
+  keepDownloads: false,
+  rememberTimestamps: true,
+};
 
 function wait(milliseconds: number) {
   return new Promise<void>((resolve) => setTimeout(resolve, milliseconds));
@@ -49,6 +61,10 @@ export function usePlayrLibrary() {
   const [folders, setFolders] = useState<ICloudFolder[]>([]);
   const [orderByFolder, setOrderByFolder] = useState<LibraryOrder>(new Map());
   const [reversedFolderPaths, setReversedFolderPaths] = useState<Set<string>>(new Set());
+  const [folderPreferencesByPath, setFolderPreferencesByPath] = useState<
+    Map<string, FolderPreferences>
+  >(new Map());
+  const [autoDownloadOnTap, setAutoDownloadOnTapState] = useState(false);
   const [progressById, setProgressById] = useState<Map<string, PlaybackProgress>>(new Map());
   const [queueIds, setQueueIds] = useState<string[]>([]);
   const [availability, setAvailability] = useState<ICloudAvailability>('available');
@@ -59,6 +75,7 @@ export function usePlayrLibrary() {
   const filesRef = useRef(files);
   const foldersRef = useRef(folders);
   const orderRef = useRef(orderByFolder);
+  const folderPreferencesRef = useRef(folderPreferencesByPath);
   const hasInitialized = useRef(false);
 
   useEffect(() => {
@@ -72,6 +89,10 @@ export function usePlayrLibrary() {
   useEffect(() => {
     orderRef.current = orderByFolder;
   }, [orderByFolder]);
+
+  useEffect(() => {
+    folderPreferencesRef.current = folderPreferencesByPath;
+  }, [folderPreferencesByPath]);
 
   const applyFiles = useCallback((nextFiles: ICloudAudioFile[]) => {
     filesRef.current = nextFiles;
@@ -104,6 +125,7 @@ export function usePlayrLibrary() {
         .filter(
           (file) =>
             overdueSet.has(file.id) &&
+            !folderPreferencesRef.current.get(parentFolderPath(file.relativePath))?.keepDownloads &&
             file.downloadState === 'downloaded' &&
             file.isUploaded,
         )
@@ -155,12 +177,22 @@ export function usePlayrLibrary() {
     let isMounted = true;
 
     async function initialize() {
-      const [cachedFiles, storedProgress, storedQueue, storedOrder, storedReversedPaths] = await Promise.all([
+      const [
+        cachedFiles,
+        storedProgress,
+        storedQueue,
+        storedOrder,
+        storedReversedPaths,
+        storedFolderPreferences,
+        storedAutoDownloadOnTap,
+      ] = await Promise.all([
         getCachedLibrary(),
         getPlaybackProgress(),
         getQueueIds(),
         getLibraryOrder(),
         getReversedFolderPaths(),
+        getFolderPreferences(),
+        getAutoDownloadOnTap(),
       ]);
       if (!isMounted) return;
 
@@ -170,6 +202,9 @@ export function usePlayrLibrary() {
       orderRef.current = storedOrder;
       setOrderByFolder(storedOrder);
       setReversedFolderPaths(storedReversedPaths);
+      folderPreferencesRef.current = storedFolderPreferences;
+      setFolderPreferencesByPath(storedFolderPreferences);
+      setAutoDownloadOnTapState(storedAutoDownloadOnTap);
       hasInitialized.current = true;
       await refresh();
     }
@@ -306,7 +341,15 @@ export function usePlayrLibrary() {
           ? `${renamedFolder.relativePath}${path.slice(relativePath.length)}`
           : path;
       const remappedReversedPaths = new Set([...reversedFolderPaths].map(remapPath));
+      const remappedFolderPreferences = new Map(
+        [...folderPreferencesRef.current].map(([path, preferences]) => [
+          remapPath(path),
+          preferences,
+        ]),
+      );
       setReversedFolderPaths(remappedReversedPaths);
+      folderPreferencesRef.current = remappedFolderPreferences;
+      setFolderPreferencesByPath(remappedFolderPreferences);
       await replaceLibraryOrder(remappedOrder);
       await replaceReversedFolderPaths(remappedReversedPaths);
       await remapFolderPathPrefix(relativePath, renamedFolder.relativePath);
@@ -363,6 +406,36 @@ export function usePlayrLibrary() {
     await saveFolderOrderReversed(parentPath, nextValue);
   }, []);
 
+  const setFolderKeepDownloads = useCallback(async (parentPath: string, enabled: boolean) => {
+    const current = folderPreferencesRef.current.get(parentPath) ?? DEFAULT_FOLDER_PREFERENCES;
+    const nextPreferences = new Map(folderPreferencesRef.current).set(parentPath, {
+      ...current,
+      keepDownloads: enabled,
+    });
+    folderPreferencesRef.current = nextPreferences;
+    setFolderPreferencesByPath(nextPreferences);
+    await saveFolderKeepDownloads(parentPath, enabled);
+  }, []);
+
+  const setFolderRememberTimestamps = useCallback(
+    async (parentPath: string, enabled: boolean) => {
+      const current = folderPreferencesRef.current.get(parentPath) ?? DEFAULT_FOLDER_PREFERENCES;
+      const nextPreferences = new Map(folderPreferencesRef.current).set(parentPath, {
+        ...current,
+        rememberTimestamps: enabled,
+      });
+      folderPreferencesRef.current = nextPreferences;
+      setFolderPreferencesByPath(nextPreferences);
+      await saveFolderRememberTimestamps(parentPath, enabled);
+    },
+    [],
+  );
+
+  const setAutoDownloadOnTap = useCallback(async (enabled: boolean) => {
+    setAutoDownloadOnTapState(enabled);
+    await saveAutoDownloadOnTap(enabled);
+  }, []);
+
   const reorderFiles = useCallback(async (parentPath: string, displayedFileIds: string[]) => {
     const nextOrder = reorderFolderFiles(
       orderRef.current,
@@ -408,6 +481,8 @@ export function usePlayrLibrary() {
     folders,
     orderByFolder,
     reversedFolderPaths,
+    folderPreferencesByPath,
+    autoDownloadOnTap,
     progressById,
     queueIds,
     availability,
@@ -425,6 +500,9 @@ export function usePlayrLibrary() {
     moveFile,
     reorderFiles,
     toggleFolderOrder,
+    setFolderKeepDownloads,
+    setFolderRememberTimestamps,
+    setAutoDownloadOnTap,
     updateProgress,
     addToQueue,
     removeFromQueue,

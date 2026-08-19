@@ -43,6 +43,9 @@ public final class PlayrLibraryViewProps: ExpoSwiftUI.ViewProps {
   @Field var searchGlobally: Bool = false
   @Field var isRefreshing: Bool = false
   @Field var isReversed: Bool = false
+  @Field var keepDownloads: Bool = false
+  @Field var rememberTimestamps: Bool = true
+  @Field var hasCloudFiles: Bool = false
   @Field var hasDownloadedFiles: Bool = false
   @Field var currentFileId: String?
   @Field var isPlaying: Bool = false
@@ -62,9 +65,12 @@ public final class PlayrLibraryViewProps: ExpoSwiftUI.ViewProps {
   var onReorderFiles = EventDispatcher()
   var onOpenFolder = EventDispatcher()
   var onPlayFolder = EventDispatcher()
+  var onDownloadFolder = EventDispatcher()
+  var onRemoveFolderDownloads = EventDispatcher()
+  var onKeepDownloadsChange = EventDispatcher()
+  var onRememberTimestampsChange = EventDispatcher()
   var onCreateFolder = EventDispatcher()
   var onRenameFolder = EventDispatcher()
-  var onRemoveAllDownloads = EventDispatcher()
   var onRefresh = EventDispatcher()
   var onToggleOrder = EventDispatcher()
   var onSearchChange = EventDispatcher()
@@ -158,7 +164,7 @@ private struct PlayrFolderCard: View {
                 .stroke(.primary, lineWidth: 3)
             }
           }
-          .frame(width: 132, height: 132)
+          .aspectRatio(1, contentMode: .fit)
 
         Image(systemName: "waveform")
           .font(.system(size: 18, weight: .medium))
@@ -172,8 +178,9 @@ private struct PlayrFolderCard: View {
         .font(.subheadline.weight(.semibold))
         .foregroundStyle(.primary)
         .lineLimit(1)
-        .frame(width: 132, alignment: .leading)
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
+    .frame(maxWidth: .infinity, alignment: .leading)
     .contentShape(Rectangle())
     .onTapGesture(perform: onOpen)
     .dropDestination(for: PlayrAudioDragItem.self) { items, _ in
@@ -196,7 +203,11 @@ private struct PlayrFolderHero: View {
   let name: String
   let itemCount: Int
   let hasAudio: Bool
+  let hasCloudFiles: Bool
+  let hasDownloadedFiles: Bool
   let onPlay: () -> Void
+  let onDownloadAll: () -> Void
+  let onRemoveAll: () -> Void
 
   var body: some View {
     VStack(spacing: 0) {
@@ -228,14 +239,39 @@ private struct PlayrFolderHero: View {
         .foregroundStyle(.secondary)
         .padding(.top, 4)
 
-      if hasAudio {
-        Button(action: onPlay) {
-          Label("Play", systemImage: "play.fill")
-            .font(.headline)
-            .padding(.horizontal, 10)
+      if hasAudio || hasCloudFiles || hasDownloadedFiles {
+        HStack(spacing: 10) {
+          if hasAudio {
+            Button(action: onPlay) {
+              Label("Play", systemImage: "play.fill")
+                .font(.headline)
+            }
+            .modifier(PlayrGlassButtonModifier())
+            .tint(.primary)
+          }
+
+          if hasCloudFiles {
+            Button(action: onDownloadAll) {
+              Label("Download All", systemImage: "icloud.and.arrow.down")
+                .font(.headline)
+            }
+            .modifier(PlayrGlassButtonModifier())
+            .tint(.primary)
+          }
+
+          if hasDownloadedFiles {
+            Menu {
+              Button("Remove Downloads", systemImage: "trash", role: .destructive) {
+                onRemoveAll()
+              }
+            } label: {
+              Label("Remove All", systemImage: "trash")
+                .font(.headline)
+            }
+            .modifier(PlayrGlassButtonModifier())
+            .tint(.primary)
+          }
         }
-        .modifier(PlayrGlassButtonModifier())
-        .tint(.primary)
         .padding(.top, 14)
       }
     }
@@ -278,12 +314,6 @@ private struct PlayrEpisodeRow: View {
           .foregroundStyle(.secondary)
           .lineLimit(1)
 
-        if progressFraction > 0 && progressFraction < 1 {
-          ProgressView(value: progressFraction)
-            .progressViewStyle(.linear)
-            .tint(.primary)
-            .padding(.top, 3)
-        }
       }
     }
     .frame(minHeight: 62)
@@ -294,15 +324,6 @@ private struct PlayrEpisodeRow: View {
     if item.downloadState == "inCloud" { return "icloud.and.arrow.down" }
     if isCurrent && isPlaying { return "pause.fill" }
     return "play.fill"
-  }
-
-  private var progressFraction: Double {
-    guard let position = item.progressPosition,
-          let duration = item.progressDuration,
-          duration > 0 else {
-      return 0
-    }
-    return min(1, max(0, position / duration))
   }
 
   private var detail: String {
@@ -317,10 +338,6 @@ private struct PlayrEpisodeRow: View {
       }
     } else if item.completedAt != nil {
       base = "Played"
-    } else if let position = item.progressPosition,
-              let duration = item.progressDuration,
-              position > 0 {
-      base = "\(formatDuration(position)) of \(formatDuration(duration))"
     } else if item.downloadState == "downloaded" {
       base = formatSize(item.size).isEmpty ? "On this iPhone" : formatSize(item.size)
     } else {
@@ -330,18 +347,6 @@ private struct PlayrEpisodeRow: View {
 
     guard let context = item.contextLabel, !context.isEmpty else { return base }
     return "\(context) · \(base)"
-  }
-
-  private func formatDuration(_ seconds: Double) -> String {
-    guard seconds.isFinite, seconds > 0 else { return "0:00" }
-    let wholeSeconds = Int(seconds)
-    let hours = wholeSeconds / 3_600
-    let minutes = (wholeSeconds % 3_600) / 60
-    let remainder = wholeSeconds % 60
-    if hours > 0 {
-      return String(format: "%d:%02d:%02d", hours, minutes, remainder)
-    }
-    return String(format: "%d:%02d", minutes, remainder)
   }
 
   private func formatSize(_ bytes: Int64) -> String {
@@ -360,7 +365,6 @@ public struct PlayrLibraryView: ExpoSwiftUI.View, ExpoSwiftUI.WithHostingView {
   @State private var editMode: EditMode = .inactive
   @State private var searchText = ""
   @State private var searchScope: PlayrSearchScope = .folder
-  @State private var showsRemoveAllConfirmation = false
 
   public init(props: PlayrLibraryViewProps) {
     self.props = props
@@ -412,14 +416,6 @@ public struct PlayrLibraryView: ExpoSwiftUI.View, ExpoSwiftUI.WithHostingView {
         props.onSearchScopeChange(["global": global])
       }
     }
-    .alert("Remove local downloads?", isPresented: $showsRemoveAllConfirmation) {
-      Button("Remove", role: .destructive) {
-        props.onRemoveAllDownloads()
-      }
-      Button("Cancel", role: .cancel) {}
-    } message: {
-      Text("Files stay in iCloud Drive.")
-    }
   }
 
   @ViewBuilder
@@ -462,7 +458,11 @@ public struct PlayrLibraryView: ExpoSwiftUI.View, ExpoSwiftUI.WithHostingView {
         name: props.title,
         itemCount: props.directFiles.count + props.folders.count,
         hasAudio: !props.directFiles.isEmpty,
-        onPlay: { props.onPlayFolder() }
+        hasCloudFiles: props.hasCloudFiles,
+        hasDownloadedFiles: props.hasDownloadedFiles,
+        onPlay: { props.onPlayFolder() },
+        onDownloadAll: { props.onDownloadFolder() },
+        onRemoveAll: { props.onRemoveFolderDownloads() }
       )
       .listRowSeparator(.hidden)
       .listRowInsets(EdgeInsets(top: 4, leading: 16, bottom: 12, trailing: 16))
@@ -494,29 +494,33 @@ public struct PlayrLibraryView: ExpoSwiftUI.View, ExpoSwiftUI.WithHostingView {
   private var folderSection: some View {
     if !props.folders.isEmpty {
       Section {
-        ScrollView(.horizontal) {
-          LazyHStack(spacing: 14) {
-            ForEach(props.folders, id: \.id) { folder in
-              PlayrFolderCard(
-                folder: folder,
-                onOpen: {
-                  finishEditing()
-                  props.onOpenFolder(["path": folder.relativePath])
-                },
-                onMove: { ids in
-                  finishEditing()
-                  props.onMoveFiles([
-                    "ids": ids,
-                    "destinationFolderPath": folder.relativePath
-                  ])
-                }
-              )
-            }
+        LazyVGrid(
+          columns: [
+            GridItem(.flexible(), spacing: 14),
+            GridItem(.flexible(), spacing: 14)
+          ],
+          spacing: 18
+        ) {
+          ForEach(props.folders, id: \.id) { folder in
+            PlayrFolderCard(
+              folder: folder,
+              onOpen: {
+                finishEditing()
+                props.onOpenFolder(["path": folder.relativePath])
+              },
+              onMove: { ids in
+                finishEditing()
+                props.onMoveFiles([
+                  "ids": ids,
+                  "destinationFolderPath": folder.relativePath
+                ])
+              }
+            )
           }
-          .padding(.vertical, 2)
         }
-        .scrollIndicators(.hidden)
+        .padding(.vertical, 2)
         .listRowSeparator(.hidden)
+        .listRowInsets(EdgeInsets(top: 4, leading: 16, bottom: 12, trailing: 16))
       } header: {
         Text("Folders")
           .font(.title3.bold())
@@ -696,16 +700,24 @@ public struct PlayrLibraryView: ExpoSwiftUI.View, ExpoSwiftUI.WithHostingView {
             Button("Rename Folder", systemImage: "pencil") {
               props.onRenameFolder()
             }
+
+            Toggle(isOn: Binding(
+              get: { props.keepDownloads },
+              set: { props.onKeepDownloadsChange(["enabled": $0]) }
+            )) {
+              Label("Keep Downloads", systemImage: "pin")
+            }
+
+            Toggle(isOn: Binding(
+              get: { props.rememberTimestamps },
+              set: { props.onRememberTimestampsChange(["enabled": $0]) }
+            )) {
+              Label("Remember Timestamp", systemImage: "clock.arrow.circlepath")
+            }
           }
 
           Button("Select Files", systemImage: "checkmark.circle") {
             withAnimation { editMode = .active }
-          }
-
-          if props.hasDownloadedFiles {
-            Button("Remove All Downloads", systemImage: "trash", role: .destructive) {
-              showsRemoveAllConfirmation = true
-            }
           }
 
           Button("Refresh", systemImage: "arrow.clockwise") {

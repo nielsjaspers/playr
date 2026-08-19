@@ -23,6 +23,7 @@ type MoveEvent = NativeSyntheticEvent<{
 }>;
 type QueryEvent = NativeSyntheticEvent<{ query: string }>;
 type SearchScopeEvent = NativeSyntheticEvent<{ global: boolean }>;
+type BooleanEvent = NativeSyntheticEvent<{ enabled: boolean }>;
 
 export type PlayrLibraryViewProps = {
   style?: StyleProp<ViewStyle>;
@@ -32,6 +33,9 @@ export type PlayrLibraryViewProps = {
   searchGlobally: boolean;
   isRefreshing: boolean;
   isReversed: boolean;
+  keepDownloads: boolean;
+  rememberTimestamps: boolean;
+  hasCloudFiles: boolean;
   hasDownloadedFiles: boolean;
   currentFileId: string | null;
   isPlaying: boolean;
@@ -50,9 +54,12 @@ export type PlayrLibraryViewProps = {
   onReorderFiles: (event: IdsEvent) => void;
   onOpenFolder: (event: PathEvent) => void;
   onPlayFolder: () => void;
+  onDownloadFolder: () => void;
+  onRemoveFolderDownloads: () => void;
+  onKeepDownloadsChange: (event: BooleanEvent) => void;
+  onRememberTimestampsChange: (event: BooleanEvent) => void;
   onCreateFolder: () => void;
   onRenameFolder: () => void;
-  onRemoveAllDownloads: () => void;
   onRefresh: () => void;
   onToggleOrder: () => void;
   onSearchChange: (event: QueryEvent) => void;

@@ -31,9 +31,6 @@ function fileDetail(file: ICloudAudioFile, progress?: PlaybackProgress, isRemovi
       : `Downloading ${Math.round(file.downloadProgress * 100)}%`;
   }
   if (progress?.completedAt) return 'Played';
-  if (progress && progress.position > 0) {
-    return `${formatDuration(progress.position)} of ${formatDuration(progress.duration)}`;
-  }
   const size = formatSize(file.size);
   if (file.downloadState === 'downloaded') return size || 'On this iPhone';
   return size ? `In iCloud · ${size}` : 'In iCloud';
@@ -64,9 +61,6 @@ export function EpisodeRow({
   onPress: () => void;
   onToggleSelection: () => void;
 }) {
-  const progressFraction = progress?.duration
-    ? Math.min(1, progress.position / progress.duration)
-    : 0;
   const actionName = file.downloadState === 'inCloud'
     ? 'icloud.and.arrow.down'
     : file.downloadState === 'downloading'
@@ -109,16 +103,6 @@ export function EpisodeRow({
         <Text numberOfLines={1} style={[styles.rowDetail, { color: palette.secondaryLabel }]}>
           {contextLabel ? `${contextLabel} · ` : ''}{fileDetail(file, progress, isRemoving)}
         </Text>
-        {progressFraction > 0 && progressFraction < 1 ? (
-          <View style={[styles.progressTrack, { backgroundColor: palette.fill }]}>
-            <View
-              style={[
-                styles.progressFill,
-                { backgroundColor: palette.label, width: `${progressFraction * 100}%` },
-              ]}
-            />
-          </View>
-        ) : null}
       </View>
 
     </Pressable>
@@ -159,15 +143,5 @@ const styles = StyleSheet.create({
   rowDetail: {
     fontSize: 13,
     marginTop: 3,
-  },
-  progressTrack: {
-    borderRadius: 2,
-    height: 2,
-    marginTop: 7,
-    overflow: 'hidden',
-    width: '100%',
-  },
-  progressFill: {
-    height: '100%',
   },
 });

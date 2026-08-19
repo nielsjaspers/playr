@@ -156,9 +156,11 @@ export function searchAudioTitles(
 export function getContinueListeningFiles(
   files: ICloudAudioFile[],
   progressById: Map<string, PlaybackProgress>,
+  foldersWithoutRememberedTimestamps: Set<string> = new Set(),
 ) {
   return files
     .filter((file) => {
+      if (foldersWithoutRememberedTimestamps.has(parentFolderPath(file.relativePath))) return false;
       const progress = progressById.get(file.id);
       return progress != null && progress.position > 0 && progress.completedAt == null;
     })

@@ -8,7 +8,17 @@ import {
 
 import type { ICloudAudioFile } from '../modules/playr-icloud';
 import { releaseAudioPlayer } from './audioPlayerLifecycle';
+import {
+  advanceFinishGate,
+  createFinishGate,
+  resolveResumePosition,
+  type FinishGate,
+} from './playbackPolicy';
 import type { PlaybackProgress } from './storage';
+
+type PlayOptions = {
+  rememberTimestamp?: boolean;
+};
 
 type PlaybackOptions = {
   progressById: Map<string, PlaybackProgress>;
@@ -23,7 +33,7 @@ function wait(milliseconds: number) {
 
 function createPlaybackPlayer() {
   return createAudioPlayer(null, {
-    updateInterval: 1_000,
+    updateInterval: 250,
     keepAudioSessionActive: true,
   });
 }
@@ -42,8 +52,9 @@ export function usePlayback({
   const statusRef = useRef(status);
   const playingRef = useRef(status.playing);
   const completedAtRef = useRef<number | null>(null);
+  const rememberTimestampRef = useRef(true);
   const lastSavedSecondRef = useRef(0);
-  const handledFinishRef = useRef(false);
+  const finishGateRef = useRef<FinishGate | null>(null);
   const onFinishedRef = useRef(onFinished);
 
   useEffect(() => {
@@ -82,7 +93,7 @@ export function usePlayback({
       if (!file || duration <= 0) return;
       await onProgress({
         fileId: file.id,
-        position,
+        position: rememberTimestampRef.current ? position : 0,
         duration,
         completedAt: completedAtRef.current,
         updatedAt: Date.now(),
@@ -106,8 +117,15 @@ export function usePlayback({
   }, [currentFile, saveCurrent, status.currentTime, status.didJustFinish, status.isLoaded]);
 
   useEffect(() => {
-    if (!currentFile || !status.didJustFinish || handledFinishRef.current) return;
-    handledFinishRef.current = true;
+    if (!currentFile || !finishGateRef.current) return;
+    const result = advanceFinishGate(finishGateRef.current, {
+      currentTime: status.currentTime,
+      didJustFinish: status.didJustFinish,
+      duration: status.duration,
+      isLoaded: status.isLoaded,
+    });
+    finishGateRef.current = result.gate;
+    if (!result.shouldFinish) return;
     playingRef.current = false;
     const completedAt = Date.now();
     completedAtRef.current = completedAt;
@@ -119,7 +137,14 @@ export function usePlayback({
       updatedAt: completedAt,
     });
     onFinishedRef.current(currentFile.id);
-  }, [currentFile, onProgress, status.didJustFinish, status.duration]);
+  }, [
+    currentFile,
+    onProgress,
+    status.currentTime,
+    status.didJustFinish,
+    status.duration,
+    status.isLoaded,
+  ]);
 
   useEffect(() => {
     const subscription = AppState.addEventListener('change', (nextState) => {
@@ -128,14 +153,43 @@ export function usePlayback({
     return () => subscription.remove();
   }, [saveCurrent]);
 
+  const replay = useCallback(async () => {
+    const file = currentFileRef.current;
+    const duration = statusRef.current.duration;
+    if (!file || duration <= 0) return;
+
+    completedAtRef.current = null;
+    finishGateRef.current = { fileId: file.id, armed: true, handled: false };
+    lastSavedSecondRef.current = 0;
+    await playerRef.current.seekTo(0);
+    await onProgress({
+      fileId: file.id,
+      position: 0,
+      duration,
+      completedAt: null,
+      updatedAt: Date.now(),
+    });
+    playerRef.current.play();
+    playingRef.current = true;
+  }, [onProgress]);
+
   const play = useCallback(
-    async (file: ICloudAudioFile) => {
+    async (file: ICloudAudioFile, options: PlayOptions = {}) => {
       if (!file.localUri || file.downloadState !== 'downloaded') {
         onError('Download this file from iCloud before playing it.');
         return;
       }
 
       if (currentFileRef.current?.id === file.id) {
+        rememberTimestampRef.current = options.rememberTimestamp ?? true;
+        const activeStatus = statusRef.current;
+        if (
+          completedAtRef.current != null ||
+          (activeStatus.duration > 0 && activeStatus.currentTime >= activeStatus.duration - 0.25)
+        ) {
+          await replay();
+          return;
+        }
         playerRef.current.play();
         playingRef.current = true;
         return;
@@ -143,14 +197,16 @@ export function usePlayback({
 
       await saveCurrent();
       const storedProgress = progressById.get(file.id);
+      const rememberTimestamp = options.rememberTimestamp ?? true;
       const isReplay = storedProgress?.completedAt != null;
-      const resumeAt = isReplay ? 0 : storedProgress?.position ?? 0;
+      const resumeAt = resolveResumePosition(storedProgress, rememberTimestamp);
 
       currentFileRef.current = file;
       setCurrentFile(file);
       completedAtRef.current = null;
+      rememberTimestampRef.current = rememberTimestamp;
       lastSavedSecondRef.current = Math.floor(resumeAt);
-      handledFinishRef.current = false;
+      finishGateRef.current = createFinishGate(file.id);
       const activePlayer = playerRef.current;
       activePlayer.replace({ uri: file.localUri, name: file.name });
       activePlayer.setActiveForLockScreen(
@@ -166,7 +222,7 @@ export function usePlayback({
       activePlayer.play();
       playingRef.current = true;
     },
-    [onError, onProgress, progressById, saveCurrent],
+    [onError, onProgress, progressById, replay, saveCurrent],
   );
 
   const toggle = useCallback(() => {
@@ -176,10 +232,18 @@ export function usePlayback({
       playingRef.current = false;
       void saveCurrent();
     } else {
+      const activeStatus = statusRef.current;
+      if (
+        completedAtRef.current != null ||
+        (activeStatus.duration > 0 && activeStatus.currentTime >= activeStatus.duration - 0.25)
+      ) {
+        void replay();
+        return;
+      }
       playerRef.current.play();
       playingRef.current = true;
     }
-  }, [saveCurrent]);
+  }, [replay, saveCurrent]);
 
   const seekTo = useCallback(
     async (seconds: number) => {
@@ -196,30 +260,11 @@ export function usePlayback({
     [seekTo],
   );
 
-  const replay = useCallback(async () => {
-    const file = currentFileRef.current;
-    const duration = statusRef.current.duration;
-    if (!file || duration <= 0) return;
-
-    completedAtRef.current = null;
-    handledFinishRef.current = false;
-    lastSavedSecondRef.current = 0;
-    await playerRef.current.seekTo(0);
-    await onProgress({
-      fileId: file.id,
-      position: 0,
-      duration,
-      completedAt: null,
-      updatedAt: Date.now(),
-    });
-    playerRef.current.play();
-    playingRef.current = true;
-  }, [onProgress]);
-
   const stop = useCallback(async () => {
     await saveCurrent();
     playingRef.current = false;
     currentFileRef.current = null;
+    finishGateRef.current = null;
     setCurrentFile(null);
 
     const previousPlayer = playerRef.current;

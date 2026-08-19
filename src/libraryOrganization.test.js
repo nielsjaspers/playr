@@ -93,4 +93,13 @@ describe('library organization', () => {
       'active.mp3',
     ]);
   });
+
+  test('continue listening excludes folders that do not remember timestamps', () => {
+    const track = file('music/track.mp3');
+    const progress = new Map([
+      [track.id, { fileId: track.id, position: 12, duration: 100, completedAt: null, updatedAt: 1 }],
+    ]);
+
+    expect(getContinueListeningFiles([track], progress, new Set(['music']))).toEqual([]);
+  });
 });

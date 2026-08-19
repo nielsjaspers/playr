@@ -10,6 +10,11 @@ export type PlaybackProgress = {
   updatedAt: number;
 };
 
+export type FolderPreferences = {
+  keepDownloads: boolean;
+  rememberTimestamps: boolean;
+};
+
 type LibraryRow = {
   id: string;
   name: string;
@@ -36,6 +41,13 @@ type OrderRow = {
   parent_path: string;
   item_key: string;
   position: number;
+};
+
+type FolderPreferenceRow = {
+  parent_path: string;
+  is_reversed: number;
+  keep_downloads: number;
+  remember_timestamps: number;
 };
 
 let databasePromise: Promise<SQLiteDatabase> | null = null;
@@ -85,9 +97,31 @@ async function getDatabase() {
 
         CREATE TABLE IF NOT EXISTS folder_preferences (
           parent_path TEXT PRIMARY KEY NOT NULL,
-          is_reversed INTEGER NOT NULL DEFAULT 0
+          is_reversed INTEGER NOT NULL DEFAULT 0,
+          keep_downloads INTEGER NOT NULL DEFAULT 0,
+          remember_timestamps INTEGER NOT NULL DEFAULT 1
+        );
+
+        CREATE TABLE IF NOT EXISTS app_preferences (
+          key TEXT PRIMARY KEY NOT NULL,
+          value TEXT NOT NULL
         );
       `);
+
+      const folderPreferenceColumns = await database.getAllAsync<{ name: string }>(
+        'PRAGMA table_info(folder_preferences)',
+      );
+      const columnNames = new Set(folderPreferenceColumns.map((column) => column.name));
+      if (!columnNames.has('keep_downloads')) {
+        await database.execAsync(
+          'ALTER TABLE folder_preferences ADD COLUMN keep_downloads INTEGER NOT NULL DEFAULT 0',
+        );
+      }
+      if (!columnNames.has('remember_timestamps')) {
+        await database.execAsync(
+          'ALTER TABLE folder_preferences ADD COLUMN remember_timestamps INTEGER NOT NULL DEFAULT 1',
+        );
+      }
       return database;
     });
   }
@@ -266,6 +300,62 @@ export async function getReversedFolderPaths() {
   return new Set(rows.map((row) => row.parent_path));
 }
 
+export async function getFolderPreferences() {
+  const database = await getDatabase();
+  const rows = await database.getAllAsync<FolderPreferenceRow>(
+    'SELECT * FROM folder_preferences',
+  );
+  return new Map<string, FolderPreferences>(
+    rows.map((row) => [
+      row.parent_path,
+      {
+        keepDownloads: row.keep_downloads === 1,
+        rememberTimestamps: row.remember_timestamps === 1,
+      },
+    ]),
+  );
+}
+
+export async function saveFolderKeepDownloads(parentPath: string, keepDownloads: boolean) {
+  const database = await getDatabase();
+  await database.runAsync(
+    `INSERT INTO folder_preferences (parent_path, keep_downloads) VALUES (?, ?)
+      ON CONFLICT(parent_path) DO UPDATE SET keep_downloads = excluded.keep_downloads`,
+    parentPath,
+    keepDownloads ? 1 : 0,
+  );
+}
+
+export async function saveFolderRememberTimestamps(
+  parentPath: string,
+  rememberTimestamps: boolean,
+) {
+  const database = await getDatabase();
+  await database.runAsync(
+    `INSERT INTO folder_preferences (parent_path, remember_timestamps) VALUES (?, ?)
+      ON CONFLICT(parent_path) DO UPDATE SET remember_timestamps = excluded.remember_timestamps`,
+    parentPath,
+    rememberTimestamps ? 1 : 0,
+  );
+}
+
+export async function getAutoDownloadOnTap() {
+  const database = await getDatabase();
+  const row = await database.getFirstAsync<{ value: string }>(
+    `SELECT value FROM app_preferences WHERE key = 'auto_download_on_tap'`,
+  );
+  return row?.value === '1';
+}
+
+export async function saveAutoDownloadOnTap(enabled: boolean) {
+  const database = await getDatabase();
+  await database.runAsync(
+    `INSERT INTO app_preferences (key, value) VALUES ('auto_download_on_tap', ?)
+      ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+    enabled ? '1' : '0',
+  );
+}
+
 export async function saveFolderOrderReversed(parentPath: string, reversed: boolean) {
   const database = await getDatabase();
   await database.runAsync(
@@ -279,10 +369,11 @@ export async function saveFolderOrderReversed(parentPath: string, reversed: bool
 export async function replaceReversedFolderPaths(parentPaths: Set<string>) {
   const database = await getDatabase();
   await database.withExclusiveTransactionAsync(async (transaction) => {
-    await transaction.runAsync('DELETE FROM folder_preferences');
+    await transaction.runAsync('UPDATE folder_preferences SET is_reversed = 0');
     for (const parentPath of parentPaths) {
       await transaction.runAsync(
-        'INSERT INTO folder_preferences (parent_path, is_reversed) VALUES (?, 1)',
+        `INSERT INTO folder_preferences (parent_path, is_reversed) VALUES (?, 1)
+          ON CONFLICT(parent_path) DO UPDATE SET is_reversed = 1`,
         parentPath,
       );
     }
@@ -320,6 +411,12 @@ export async function remapFolderPathPrefix(oldPath: string, newPath: string) {
     oldPrefix.length,
     oldPrefix,
   );
+  const preferenceRows = await database.getAllAsync<FolderPreferenceRow>(
+    'SELECT * FROM folder_preferences WHERE parent_path = ? OR substr(parent_path, 1, ?) = ?',
+    oldPath,
+    oldPrefix.length,
+    oldPrefix,
+  );
 
   const remap = (path: string) =>
     path === oldPath ? newPath : `${newPath}/${path.slice(oldPrefix.length)}`;
@@ -336,6 +433,21 @@ export async function remapFolderPathPrefix(oldPath: string, newPath: string) {
         'UPDATE OR REPLACE queue_items SET file_id = ? WHERE file_id = ?',
         remap(row.file_id),
         row.file_id,
+      );
+    }
+    for (const row of preferenceRows) {
+      await transaction.runAsync(
+        `INSERT OR REPLACE INTO folder_preferences (
+          parent_path, is_reversed, keep_downloads, remember_timestamps
+        ) VALUES (?, ?, ?, ?)`,
+        remap(row.parent_path),
+        row.is_reversed,
+        row.keep_downloads,
+        row.remember_timestamps,
+      );
+      await transaction.runAsync(
+        'DELETE FROM folder_preferences WHERE parent_path = ?',
+        row.parent_path,
       );
     }
   });

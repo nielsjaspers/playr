@@ -1,6 +1,8 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import {
+  Animated,
   Modal,
+  PanResponder,
   SafeAreaView,
   StyleSheet,
   Text,
@@ -78,6 +80,8 @@ export function PlayerModal({
   shuffleEnabled,
   onCycleRepeat,
   onToggleShuffle,
+  onNext,
+  onPrevious,
   onClose,
 }: {
   isVisible: boolean;
@@ -87,10 +91,65 @@ export function PlayerModal({
   shuffleEnabled: boolean;
   onCycleRepeat: () => void;
   onToggleShuffle: () => void;
+  onNext: () => Promise<boolean>;
+  onPrevious: () => Promise<boolean>;
   onClose: () => void;
 }) {
   const viewport = useWindowDimensions();
   const layout = getPlayerLayout(viewport.width, viewport.height);
+  const artworkTranslation = useRef(new Animated.Value(0)).current;
+  const artworkPanResponder = useMemo(
+    () =>
+      PanResponder.create({
+        onMoveShouldSetPanResponder: (_, gesture) =>
+          Math.abs(gesture.dx) > 12 && Math.abs(gesture.dx) > Math.abs(gesture.dy),
+        onPanResponderMove: (_, gesture) => {
+          artworkTranslation.setValue(gesture.dx * 0.65);
+        },
+        onPanResponderRelease: (_, gesture) => {
+          const navigate = gesture.dx <= -64
+            ? onNext
+            : gesture.dx >= 64
+              ? onPrevious
+              : null;
+          if (navigate) {
+            const exitPosition = gesture.dx < 0 ? -viewport.width : viewport.width;
+            Animated.timing(artworkTranslation, {
+              toValue: exitPosition,
+              duration: 170,
+              useNativeDriver: true,
+            }).start(({ finished }) => {
+              if (!finished) return;
+              void navigate().then((didMove) => {
+                if (didMove) artworkTranslation.setValue(-exitPosition);
+                Animated.spring(artworkTranslation, {
+                  toValue: 0,
+                  damping: 20,
+                  stiffness: 190,
+                  useNativeDriver: true,
+                }).start();
+              });
+            });
+            return;
+          }
+          Animated.spring(artworkTranslation, {
+            toValue: 0,
+            damping: 20,
+            stiffness: 190,
+            useNativeDriver: true,
+          }).start();
+        },
+        onPanResponderTerminate: () => {
+          Animated.spring(artworkTranslation, {
+            toValue: 0,
+            damping: 20,
+            stiffness: 190,
+            useNativeDriver: true,
+          }).start();
+        },
+      }),
+    [artworkTranslation, onNext, onPrevious, viewport.width],
+  );
 
   return (
     <Modal
@@ -113,18 +172,20 @@ export function PlayerModal({
           </View>
 
           <View style={styles.playerBody}>
-            <View
+            <Animated.View
+              {...artworkPanResponder.panHandlers}
               style={[
                 styles.artwork,
                 {
                   backgroundColor: palette.fill,
                   height: layout.artworkSize,
+                  transform: [{ translateX: artworkTranslation }],
                   width: layout.artworkSize,
                 },
               ]}
             >
               <Icon name="waveform" color={palette.accent} size={92} weight="regular" />
-            </View>
+            </Animated.View>
 
             <View style={styles.metadata}>
               <Text numberOfLines={2} style={[styles.title, { color: palette.label }]}>

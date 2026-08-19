@@ -8,6 +8,7 @@ import {
   StyleSheet,
   Text,
   useColorScheme,
+  useWindowDimensions,
   View,
 } from 'react-native';
 import { StatusBar } from 'expo-status-bar';
@@ -41,20 +42,25 @@ import {
   type PlaybackSequence,
   type RepeatMode,
 } from './playbackSequence';
+import { cloudPlaybackBehavior } from './playbackPolicy';
 import { usePlayback } from './usePlayback';
 import { usePlayrLibrary } from './usePlayrLibrary';
 import { createPalette, GlassPanel, Icon, type Palette } from './ui';
 
 type Screen = 'library' | 'queue';
 
+function wait(milliseconds: number) {
+  return new Promise<void>((resolve) => setTimeout(resolve, milliseconds));
+}
+
 export default function PlayrApp() {
   const isDark = useColorScheme() === 'dark';
+  const viewport = useWindowDimensions();
   const palette = useMemo(() => createPalette(isDark), [isDark]);
   const library = usePlayrLibrary();
   const [screen, setScreen] = useState<Screen>('library');
   const [isPlayerOpen, setIsPlayerOpen] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
-  const [cloudPlaybackPrompt, setCloudPlaybackPrompt] = useState<ICloudAudioFile | null>(null);
   const [currentFolderPath, setCurrentFolderPath] = useState(ROOT_FOLDER_PATH);
   const [searchQuery, setSearchQuery] = useState('');
   const [searchGlobally, setSearchGlobally] = useState(false);
@@ -67,12 +73,26 @@ export default function PlayrApp() {
   const repeatModeRef = useRef(repeatMode);
   const shuffleEnabledRef = useRef(shuffleEnabled);
   const playbackRef = useRef<ReturnType<typeof usePlayback> | null>(null);
+  const prepareAndPlayRef = useRef<((file: ICloudAudioFile) => Promise<boolean>) | null>(null);
+  const downloadRef = useRef(library.download);
+  const verifyFileRef = useRef(library.verifyFile);
+  const folderPreferencesRef = useRef(library.folderPreferencesByPath);
+  const preparingFilesRef = useRef(new Map<string, Promise<ICloudAudioFile>>());
   const miniPlayerTranslation = useRef(new Animated.Value(0)).current;
 
   useEffect(() => {
     filesRef.current = library.files;
     queueIdsRef.current = library.queueIds;
-  }, [library.files, library.queueIds]);
+    downloadRef.current = library.download;
+    verifyFileRef.current = library.verifyFile;
+    folderPreferencesRef.current = library.folderPreferencesByPath;
+  }, [
+    library.download,
+    library.files,
+    library.folderPreferencesByPath,
+    library.queueIds,
+    library.verifyFile,
+  ]);
 
   useEffect(() => {
     playbackSequenceRef.current = playbackSequence;
@@ -108,11 +128,7 @@ export default function PlayrApp() {
 
       const nextFile = filesRef.current.find((file) => file.id === targetId);
       if (!nextFile) return;
-      if (nextFile.downloadState === 'downloaded' && nextFile.localUri) {
-        void playbackRef.current?.play(nextFile);
-      } else {
-        setCloudPlaybackPrompt(nextFile);
-      }
+      void prepareAndPlayRef.current?.(nextFile);
     },
     [],
   );
@@ -144,32 +160,82 @@ export default function PlayrApp() {
     );
   }, [library.clearError, presentedError]);
 
-  const downloadAndMaybePlay = useCallback(
-    async (file: ICloudAudioFile, playAfterDownload: boolean) => {
-      try {
-        const downloadedFiles = await library.download([file.id]);
-        const downloadedFile = downloadedFiles.find((item) => item.id === file.id);
-        if (downloadedFile && playAfterDownload) await playbackRef.current?.play(downloadedFile);
-      } catch (caughtError) {
-        setNotice(caughtError instanceof Error ? caughtError.message : 'The download failed.');
-      }
+  const rememberTimestampForFile = useCallback((file: ICloudAudioFile) => {
+    return (
+      folderPreferencesRef.current.get(parentFolderPath(file.relativePath))
+        ?.rememberTimestamps ?? true
+    );
+  }, []);
+
+  const playDownloadedFile = useCallback(
+    async (file: ICloudAudioFile) => {
+      await playbackRef.current?.play(file, {
+        rememberTimestamp: rememberTimestampForFile(file),
+      });
     },
-    [library.download],
+    [rememberTimestampForFile],
   );
 
+  const downloadFileToLocal = useCallback(async (file: ICloudAudioFile) => {
+    let verifiedFile = await verifyFileRef.current(file.id);
+    if (!verifiedFile) throw new Error('This file is no longer in the Playr iCloud folder.');
+    if (verifiedFile.downloadState === 'downloaded' && verifiedFile.localUri) return verifiedFile;
+
+    if (verifiedFile.downloadState === 'inCloud') {
+      const downloadedFiles = await downloadRef.current([verifiedFile.id]);
+      const downloadedFile = downloadedFiles.find((item) => item.id === verifiedFile?.id);
+      if (downloadedFile?.localUri) return downloadedFile;
+    }
+
+    for (let attempt = 0; attempt < 120; attempt += 1) {
+      await wait(500);
+      verifiedFile = await verifyFileRef.current(file.id);
+      if (verifiedFile?.downloadState === 'downloaded' && verifiedFile.localUri) {
+        return verifiedFile;
+      }
+    }
+    throw new Error('The iCloud download is taking longer than expected.');
+  }, []);
+
+  const prepareDownloadedFile = useCallback(
+    (file: ICloudAudioFile) => {
+      const existingPreparation = preparingFilesRef.current.get(file.id);
+      if (existingPreparation) return existingPreparation;
+
+      const preparation = downloadFileToLocal(file).finally(() => {
+        preparingFilesRef.current.delete(file.id);
+      });
+      preparingFilesRef.current.set(file.id, preparation);
+      return preparation;
+    },
+    [downloadFileToLocal],
+  );
+
+  const prepareAndPlay = useCallback(
+    async (file: ICloudAudioFile) => {
+      try {
+        const downloadedFile = await prepareDownloadedFile(file);
+        await playDownloadedFile(downloadedFile);
+        return true;
+      } catch (caughtError) {
+        setNotice(caughtError instanceof Error ? caughtError.message : 'The download failed.');
+        return false;
+      }
+    },
+    [playDownloadedFile, prepareDownloadedFile],
+  );
+  prepareAndPlayRef.current = prepareAndPlay;
+
   useEffect(() => {
-    if (!cloudPlaybackPrompt) return;
-    const file = cloudPlaybackPrompt;
-    setCloudPlaybackPrompt(null);
-    Alert.alert(
-      'Next item is in iCloud',
-      `Download “${file.name}” and continue playback?`,
-      [
-        { text: 'Not Now', style: 'cancel' },
-        { text: 'Download', onPress: () => void downloadAndMaybePlay(file, true) },
-      ],
-    );
-  }, [cloudPlaybackPrompt, downloadAndMaybePlay]);
+    const currentFile = playback.currentFile;
+    const sequence = playbackSequence;
+    if (!currentFile || !sequence) return;
+    const targetId = getCompletionTarget(sequence.playOrderIds, currentFile.id, repeatMode);
+    if (!targetId || targetId === currentFile.id) return;
+    const targetFile = library.files.find((file) => file.id === targetId);
+    if (targetFile?.downloadState !== 'inCloud') return;
+    void prepareDownloadedFile(targetFile).catch(() => undefined);
+  }, [library.files, playback.currentFile, playbackSequence, prepareDownloadedFile, repeatMode]);
 
   const openFile = useCallback(
     async (file: ICloudAudioFile) => {
@@ -180,11 +246,16 @@ export default function PlayrApp() {
           return;
         }
         if (verifiedFile.downloadState === 'downloaded') {
-          await playback.play(verifiedFile);
+          await playDownloadedFile(verifiedFile);
           return;
         }
         if (verifiedFile.downloadState === 'downloading') {
-          setNotice(`${verifiedFile.name} is still downloading from iCloud.`);
+          void prepareAndPlay(verifiedFile);
+          return;
+        }
+        const cloudBehavior = cloudPlaybackBehavior('direct', library.autoDownloadOnTap);
+        if (cloudBehavior === 'downloadAndPlay') {
+          void prepareAndPlay(verifiedFile);
           return;
         }
         Alert.alert(
@@ -194,7 +265,14 @@ export default function PlayrApp() {
             { text: 'Cancel', style: 'cancel' },
             {
               text: 'Download and Play',
-              onPress: () => void downloadAndMaybePlay(verifiedFile, true),
+              onPress: () => void prepareAndPlay(verifiedFile),
+            },
+            {
+              text: 'Always Download',
+              onPress: () => {
+                void library.setAutoDownloadOnTap(true);
+                void prepareAndPlay(verifiedFile);
+              },
             },
           ],
         );
@@ -202,23 +280,20 @@ export default function PlayrApp() {
         setNotice(caughtError instanceof Error ? caughtError.message : 'The file could not open.');
       }
     },
-    [downloadAndMaybePlay, library.verifyFile, playback.play],
+    [
+      library.autoDownloadOnTap,
+      library.setAutoDownloadOnTap,
+      library.verifyFile,
+      playDownloadedFile,
+      prepareAndPlay,
+    ],
   );
 
   const addFileToQueue = useCallback(
     async (file: ICloudAudioFile) => {
       await library.addToQueue(file.id);
-      if (file.downloadState !== 'inCloud') return;
-      Alert.alert(
-        'Added to Queue',
-        'This file is only in iCloud. Download it now, or wait until Playr reaches it?',
-        [
-          { text: 'Later', style: 'cancel' },
-          { text: 'Download', onPress: () => void downloadAndMaybePlay(file, false) },
-        ],
-      );
     },
-    [downloadAndMaybePlay, library.addToQueue],
+    [library.addToQueue],
   );
 
   const removeFileDownloads = useCallback(
@@ -328,9 +403,9 @@ export default function PlayrApp() {
       const firstFile = files.find((file) => file.id === firstId);
       if (!firstFile) return;
       updatePlaybackSequence(sequence);
-      void openFile(firstFile);
+      void prepareAndPlay(firstFile);
     },
-    [openFile, updatePlaybackSequence],
+    [prepareAndPlay, updatePlaybackSequence],
   );
 
   const playQueueFile = useCallback(
@@ -350,21 +425,22 @@ export default function PlayrApp() {
   );
 
   const playAdjacent = useCallback(
-    (direction: 'next' | 'previous') => {
+    async (direction: 'next' | 'previous') => {
       const currentFile = playbackRef.current?.currentFile;
       const sequence = playbackSequenceRef.current;
-      if (!currentFile || !sequence) return;
+      if (!currentFile || !sequence) return false;
       const targetId = getAdjacentPlaybackId(
         sequence.playOrderIds,
         currentFile.id,
         direction,
         repeatModeRef.current === 'all',
       );
-      if (!targetId) return;
+      if (!targetId) return false;
       const targetFile = filesRef.current.find((file) => file.id === targetId);
-      if (targetFile) void openFile(targetFile);
+      if (!targetFile) return false;
+      return prepareAndPlay(targetFile);
     },
-    [openFile],
+    [prepareAndPlay],
   );
 
   const toggleShuffle = useCallback(() => {
@@ -399,8 +475,33 @@ export default function PlayrApp() {
           miniPlayerTranslation.setValue(gesture.dx * 0.45);
         },
         onPanResponderRelease: (_, gesture) => {
-          if (gesture.dx <= -64) playAdjacent('next');
-          if (gesture.dx >= 64) playAdjacent('previous');
+          const direction = gesture.dx <= -64
+            ? 'next'
+            : gesture.dx >= 64
+              ? 'previous'
+              : null;
+          if (direction) {
+            const exitPosition = direction === 'next' ? -viewport.width : viewport.width;
+            Animated.timing(miniPlayerTranslation, {
+              toValue: exitPosition,
+              duration: 160,
+              useNativeDriver: true,
+            }).start(({ finished }) => {
+              if (!finished) return;
+              void playAdjacent(direction).then((didMove) => {
+                if (didMove) {
+                  miniPlayerTranslation.setValue(-exitPosition);
+                }
+                Animated.spring(miniPlayerTranslation, {
+                  toValue: 0,
+                  damping: 20,
+                  stiffness: 190,
+                  useNativeDriver: true,
+                }).start();
+              });
+            });
+            return;
+          }
           Animated.spring(miniPlayerTranslation, {
             toValue: 0,
             damping: 18,
@@ -417,11 +518,14 @@ export default function PlayrApp() {
           }).start();
         },
       }),
-    [miniPlayerTranslation, playAdjacent],
+    [miniPlayerTranslation, playAdjacent, viewport.width],
   );
 
   const renderMiniPlayer = () => {
     if (!playback.currentFile) return null;
+    const progressFraction = playback.status.duration > 0
+      ? Math.min(1, Math.max(0, playback.status.currentTime / playback.status.duration))
+      : 0;
     return (
       <Animated.View
         {...miniPlayerPanResponder.panHandlers}
@@ -463,6 +567,17 @@ export default function PlayrApp() {
               size={23}
             />
           </Pressable>
+          <View style={[styles.miniProgressTrack, { backgroundColor: palette.fill }]}>
+            <View
+              style={[
+                styles.miniProgressFill,
+                {
+                  backgroundColor: palette.label,
+                  width: `${progressFraction * 100}%`,
+                },
+              ]}
+            />
+          </View>
         </GlassPanel>
       </Animated.View>
     );
@@ -485,8 +600,21 @@ export default function PlayrApp() {
       library.orderByFolder,
       isReversed,
     );
+    const currentFolderPreferences = library.folderPreferencesByPath.get(currentFolderPath) ?? {
+      keepDownloads: false,
+      rememberTimestamps: true,
+    };
+    const foldersWithoutRememberedTimestamps = new Set(
+      [...library.folderPreferencesByPath]
+        .filter(([, preferences]) => !preferences.rememberTimestamps)
+        .map(([path]) => path),
+    );
     const continueListeningFiles = currentFolderPath === ROOT_FOLDER_PATH
-      ? getContinueListeningFiles(library.files, library.progressById)
+      ? getContinueListeningFiles(
+          library.files,
+          library.progressById,
+          foldersWithoutRememberedTimestamps,
+        )
       : [];
     const searchResults = searchAudioTitles(
       library.files,
@@ -542,9 +670,12 @@ export default function PlayrApp() {
             currentFolderPath={currentFolderPath}
             directFiles={directFiles.map((file) => nativeItem(file))}
             folders={childFolders}
-            hasDownloadedFiles={library.files.some(
+            hasCloudFiles={directFiles.some((file) => file.downloadState === 'inCloud')}
+            hasDownloadedFiles={directFiles.some(
               (file) => file.downloadState === 'downloaded',
             )}
+            keepDownloads={currentFolderPreferences.keepDownloads}
+            rememberTimestamps={currentFolderPreferences.rememberTimestamps}
             isPlaying={playback.status.playing}
             isRefreshing={library.isRefreshing}
             isReversed={isReversed}
@@ -569,6 +700,15 @@ export default function PlayrApp() {
                 () => undefined,
               );
             }}
+            onDownloadFolder={() => {
+              const ids = directFiles
+                .filter((file) => file.downloadState === 'inCloud')
+                .map((file) => file.id);
+              if (ids.length > 0) void library.download(ids);
+            }}
+            onKeepDownloadsChange={({ nativeEvent }) => {
+              void library.setFolderKeepDownloads(currentFolderPath, nativeEvent.enabled);
+            }}
             onOpenFile={({ nativeEvent }) => {
               const file = library.files.find((item) => item.id === nativeEvent.id);
               if (file) pressEpisode(file, sequenceForFolderFile(file));
@@ -580,8 +720,11 @@ export default function PlayrApp() {
             }}
             onPlayFolder={() => playFolder(currentFolderPath, directFiles)}
             onRefresh={() => void library.refresh()}
-            onRemoveAllDownloads={() => {
-              const ids = library.files
+            onRememberTimestampsChange={({ nativeEvent }) => {
+              void library.setFolderRememberTimestamps(currentFolderPath, nativeEvent.enabled);
+            }}
+            onRemoveFolderDownloads={() => {
+              const ids = directFiles
                 .filter((file) => file.downloadState === 'downloaded')
                 .map((file) => file.id);
               if (ids.length > 0) void removeFileDownloads(ids);
@@ -728,6 +871,8 @@ export default function PlayrApp() {
         isVisible={isPlayerOpen}
         onCycleRepeat={advanceRepeatMode}
         onClose={() => setIsPlayerOpen(false)}
+        onNext={() => playAdjacent('next')}
+        onPrevious={() => playAdjacent('previous')}
         onToggleShuffle={toggleShuffle}
         palette={palette}
         playback={playback}
@@ -782,4 +927,13 @@ const styles = StyleSheet.create({
   miniTitle: { fontSize: 15, fontWeight: '600' },
   miniDetail: { fontSize: 12, marginTop: 3 },
   miniControl: { alignItems: 'center', height: 48, justifyContent: 'center', width: 48 },
+  miniProgressTrack: {
+    bottom: 0,
+    height: 2,
+    left: 22,
+    overflow: 'hidden',
+    position: 'absolute',
+    right: 22,
+  },
+  miniProgressFill: { height: '100%' },
 });
