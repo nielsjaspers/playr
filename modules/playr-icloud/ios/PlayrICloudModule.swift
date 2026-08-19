@@ -246,6 +246,12 @@ public final class PlayrICloudModule: Module {
       }
     }
 
+    AsyncFunction("getAudioFilesAsync") { (ids: [String]) in
+      ids.compactMap { id in
+        try? self.audioFileRecord(for: id)
+      }
+    }
+
     AsyncFunction("removeDownloadsAsync") { (ids: [String]) in
       ids.map { id in
         do {
@@ -319,6 +325,38 @@ public final class PlayrICloudModule: Module {
       )
     }
     return candidate
+  }
+
+  private func audioFileRecord(for relativePath: String) throws -> ICloudAudioFileRecord {
+    let url = try audioURL(for: relativePath)
+    let values = try url.resourceValues(forKeys: [
+      .contentModificationDateKey,
+      .fileSizeKey,
+      .ubiquitousItemDownloadingStatusKey,
+      .ubiquitousItemIsDownloadingKey,
+      .ubiquitousItemIsUploadedKey,
+    ])
+
+    let downloadState: String
+    if values.ubiquitousItemIsDownloading == true {
+      downloadState = "downloading"
+    } else if values.ubiquitousItemDownloadingStatus == .notDownloaded {
+      downloadState = "inCloud"
+    } else {
+      downloadState = "downloaded"
+    }
+
+    var record = ICloudAudioFileRecord()
+    record.id = relativePath
+    record.name = url.deletingPathExtension().lastPathComponent
+    record.relativePath = relativePath
+    record.size = Int64(values.fileSize ?? 0)
+    record.modifiedAt = values.contentModificationDate.map { $0.timeIntervalSince1970 * 1_000 }
+    record.downloadState = downloadState
+    record.downloadProgress = nil
+    record.localUri = downloadState == "downloaded" ? url.absoluteString : nil
+    record.isUploaded = values.ubiquitousItemIsUploaded ?? false
+    return record
   }
 
   private func operationResult(

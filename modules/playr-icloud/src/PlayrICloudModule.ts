@@ -10,6 +10,7 @@ declare class PlayrICloudModule extends NativeModule<{}> {
   getAvailabilityAsync(): Promise<ICloudAvailability>;
   ensureLibraryAsync(): Promise<void>;
   listAudioFilesAsync(): Promise<ICloudAudioFile[]>;
+  getAudioFilesAsync(ids: string[]): Promise<ICloudAudioFile[]>;
   requestDownloadsAsync(ids: string[]): Promise<ICloudFileOperationResult[]>;
   removeDownloadsAsync(ids: string[]): Promise<ICloudFileOperationResult[]>;
 }

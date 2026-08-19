@@ -1,0 +1,196 @@
+import { openDatabaseAsync, type SQLiteDatabase } from 'expo-sqlite';
+
+import type { ICloudAudioFile } from '../modules/playr-icloud';
+
+export type PlaybackProgress = {
+  fileId: string;
+  position: number;
+  duration: number;
+  completedAt: number | null;
+  updatedAt: number;
+};
+
+type LibraryRow = {
+  id: string;
+  name: string;
+  relative_path: string;
+  size: number;
+  modified_at: number | null;
+  download_state: ICloudAudioFile['downloadState'];
+  download_progress: number | null;
+  local_uri: string | null;
+  is_uploaded: number;
+};
+
+type ProgressRow = {
+  file_id: string;
+  position_seconds: number;
+  duration_seconds: number;
+  completed_at: number | null;
+  updated_at: number;
+};
+
+type QueueRow = { file_id: string };
+
+let databasePromise: Promise<SQLiteDatabase> | null = null;
+
+async function getDatabase() {
+  if (!databasePromise) {
+    databasePromise = openDatabaseAsync('playr.db').then(async (database) => {
+      await database.execAsync(`
+        PRAGMA journal_mode = WAL;
+        PRAGMA foreign_keys = ON;
+
+        CREATE TABLE IF NOT EXISTS library_items (
+          id TEXT PRIMARY KEY NOT NULL,
+          name TEXT NOT NULL,
+          relative_path TEXT NOT NULL,
+          size INTEGER NOT NULL,
+          modified_at INTEGER,
+          download_state TEXT NOT NULL,
+          download_progress REAL,
+          local_uri TEXT,
+          is_uploaded INTEGER NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS playback_progress (
+          file_id TEXT PRIMARY KEY NOT NULL,
+          position_seconds REAL NOT NULL,
+          duration_seconds REAL NOT NULL,
+          completed_at INTEGER,
+          updated_at INTEGER NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS playback_progress_completed_at
+          ON playback_progress(completed_at);
+
+        CREATE TABLE IF NOT EXISTS queue_items (
+          file_id TEXT PRIMARY KEY NOT NULL,
+          position INTEGER NOT NULL UNIQUE
+        );
+      `);
+      return database;
+    });
+  }
+
+  return databasePromise;
+}
+
+export async function getCachedLibrary(): Promise<ICloudAudioFile[]> {
+  const database = await getDatabase();
+  const rows = await database.getAllAsync<LibraryRow>(
+    'SELECT * FROM library_items ORDER BY modified_at DESC, name COLLATE NOCASE ASC',
+  );
+
+  return rows.map((row) => ({
+    id: row.id,
+    name: row.name,
+    relativePath: row.relative_path,
+    size: row.size,
+    modifiedAt: row.modified_at,
+    downloadState: row.download_state,
+    downloadProgress: row.download_progress,
+    localUri: row.local_uri,
+    isUploaded: row.is_uploaded === 1,
+  }));
+}
+
+export async function replaceLibraryCache(files: ICloudAudioFile[]) {
+  const database = await getDatabase();
+
+  await database.withExclusiveTransactionAsync(async (transaction) => {
+    await transaction.runAsync('DELETE FROM library_items');
+    for (const file of files) {
+      await transaction.runAsync(
+        `INSERT INTO library_items (
+          id, name, relative_path, size, modified_at, download_state,
+          download_progress, local_uri, is_uploaded
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        file.id,
+        file.name,
+        file.relativePath,
+        file.size,
+        file.modifiedAt,
+        file.downloadState,
+        file.downloadProgress,
+        file.localUri,
+        file.isUploaded ? 1 : 0,
+      );
+    }
+  });
+}
+
+export async function getPlaybackProgress(): Promise<Map<string, PlaybackProgress>> {
+  const database = await getDatabase();
+  const rows = await database.getAllAsync<ProgressRow>('SELECT * FROM playback_progress');
+
+  return new Map(
+    rows.map((row) => [
+      row.file_id,
+      {
+        fileId: row.file_id,
+        position: row.position_seconds,
+        duration: row.duration_seconds,
+        completedAt: row.completed_at,
+        updatedAt: row.updated_at,
+      },
+    ]),
+  );
+}
+
+export async function savePlaybackProgress(progress: PlaybackProgress) {
+  const database = await getDatabase();
+  await database.runAsync(
+    `INSERT INTO playback_progress (
+      file_id, position_seconds, duration_seconds, completed_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?)
+    ON CONFLICT(file_id) DO UPDATE SET
+      position_seconds = excluded.position_seconds,
+      duration_seconds = excluded.duration_seconds,
+      completed_at = excluded.completed_at,
+      updated_at = excluded.updated_at`,
+    progress.fileId,
+    progress.position,
+    progress.duration,
+    progress.completedAt,
+    progress.updatedAt,
+  );
+}
+
+export async function getOverdueCompletedIds(cutoff: number) {
+  const database = await getDatabase();
+  const rows = await database.getAllAsync<{ file_id: string }>(
+    `SELECT file_id
+      FROM playback_progress
+      WHERE completed_at IS NOT NULL AND completed_at < ?`,
+    cutoff,
+  );
+  return rows.map((row) => row.file_id);
+}
+
+export async function getQueueIds() {
+  const database = await getDatabase();
+  const rows = await database.getAllAsync<QueueRow>(
+    'SELECT file_id FROM queue_items ORDER BY position ASC',
+  );
+  return rows.map((row) => row.file_id);
+}
+
+export async function addToQueue(fileId: string) {
+  const database = await getDatabase();
+  await database.runAsync(
+    `INSERT OR IGNORE INTO queue_items (file_id, position)
+      VALUES (?, COALESCE((SELECT MAX(position) + 1 FROM queue_items), 0))`,
+    fileId,
+  );
+}
+
+export async function removeFromQueue(fileId: string) {
+  const database = await getDatabase();
+  await database.runAsync('DELETE FROM queue_items WHERE file_id = ?', fileId);
+}
+
+export async function clearQueue() {
+  const database = await getDatabase();
+  await database.runAsync('DELETE FROM queue_items');
+}

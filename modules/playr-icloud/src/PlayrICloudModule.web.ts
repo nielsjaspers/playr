@@ -20,6 +20,10 @@ class PlayrICloudModule extends NativeModule<{}> {
     return [];
   }
 
+  async getAudioFilesAsync(_ids: string[]): Promise<ICloudAudioFile[]> {
+    return [];
+  }
+
   async requestDownloadsAsync(_ids: string[]): Promise<ICloudFileOperationResult[]> {
     return [];
   }
