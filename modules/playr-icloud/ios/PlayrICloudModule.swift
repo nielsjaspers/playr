@@ -29,165 +29,7 @@ private func makeICloudException(_ description: String) -> Exception {
   )
 }
 
-private final class AudioMetadataQuery {
-  private let documentsURL: URL
-  private let query = NSMetadataQuery()
-  private let completion: (Result<[ICloudAudioFileRecord], Error>) -> Void
-  private var observer: NSObjectProtocol?
-  private var timeoutWorkItem: DispatchWorkItem?
-  private var hasFinished = false
-
-  init(
-    documentsURL: URL,
-    completion: @escaping (Result<[ICloudAudioFileRecord], Error>) -> Void
-  ) {
-    self.documentsURL = documentsURL.standardizedFileURL
-    self.completion = completion
-  }
-
-  func start() {
-    query.searchScopes = [NSMetadataQueryUbiquitousDocumentsScope]
-    query.predicate = NSPredicate(
-      format: "%K BEGINSWITH %@",
-      NSMetadataItemPathKey,
-      documentsURL.path
-    )
-
-    observer = NotificationCenter.default.addObserver(
-      forName: .NSMetadataQueryDidFinishGathering,
-      object: query,
-      queue: .main
-    ) { [weak self] _ in
-      self?.finish()
-    }
-
-    let timeoutWorkItem = DispatchWorkItem { [weak self] in
-      self?.fail(
-        NSError(
-          domain: "PlayrICloud",
-          code: 1,
-          userInfo: [NSLocalizedDescriptionKey: "iCloud did not finish loading the library in time."]
-        )
-      )
-    }
-    self.timeoutWorkItem = timeoutWorkItem
-    DispatchQueue.main.asyncAfter(deadline: .now() + 12, execute: timeoutWorkItem)
-
-    guard query.start() else {
-      fail(
-        NSError(
-          domain: "PlayrICloud",
-          code: 2,
-          userInfo: [NSLocalizedDescriptionKey: "iCloud could not start the library query."]
-        )
-      )
-      return
-    }
-  }
-
-  func cancel() {
-    guard !hasFinished else { return }
-    hasFinished = true
-    cleanUp()
-  }
-
-  private func finish() {
-    guard !hasFinished else { return }
-    hasFinished = true
-    query.disableUpdates()
-
-    let files = query.results
-      .compactMap { $0 as? NSMetadataItem }
-      .compactMap(makeAudioFile)
-      .sorted { left, right in
-        if left.modifiedAt == right.modifiedAt {
-          return left.name.localizedStandardCompare(right.name) == .orderedAscending
-        }
-        return (left.modifiedAt ?? 0) > (right.modifiedAt ?? 0)
-      }
-
-    cleanUp()
-    completion(.success(files))
-  }
-
-  private func fail(_ error: Error) {
-    guard !hasFinished else { return }
-    hasFinished = true
-    cleanUp()
-    completion(.failure(error))
-  }
-
-  private func cleanUp() {
-    timeoutWorkItem?.cancel()
-    timeoutWorkItem = nil
-
-    if let observer {
-      NotificationCenter.default.removeObserver(observer)
-      self.observer = nil
-    }
-
-    query.stop()
-  }
-
-  private func makeAudioFile(from item: NSMetadataItem) -> ICloudAudioFileRecord? {
-    guard
-      let url = item.value(forAttribute: NSMetadataItemURLKey) as? URL,
-      supportedAudioExtensions.contains(url.pathExtension.lowercased()),
-      let relativePath = relativePath(for: url)
-    else {
-      return nil
-    }
-
-    let isDownloading = item.value(
-      forAttribute: NSMetadataUbiquitousItemIsDownloadingKey
-    ) as? Bool ?? false
-    let rawDownloadStatus = item.value(
-      forAttribute: NSMetadataUbiquitousItemDownloadingStatusKey
-    ) as? String
-
-    let downloadState: String
-    if isDownloading {
-      downloadState = "downloading"
-    } else if rawDownloadStatus == NSMetadataUbiquitousItemDownloadingStatusNotDownloaded {
-      downloadState = "inCloud"
-    } else {
-      downloadState = "downloaded"
-    }
-
-    let progress = item.value(
-      forAttribute: NSMetadataUbiquitousItemPercentDownloadedKey
-    ) as? Double
-    let modifiedAt = item.value(
-      forAttribute: NSMetadataItemFSContentChangeDateKey
-    ) as? Date
-
-    let record = ICloudAudioFileRecord()
-    record.id = relativePath
-    record.name = url.deletingPathExtension().lastPathComponent
-    record.relativePath = relativePath
-    record.size = (item.value(forAttribute: NSMetadataItemFSSizeKey) as? NSNumber)?.int64Value ?? 0
-    record.modifiedAt = modifiedAt.map { $0.timeIntervalSince1970 * 1_000 }
-    record.downloadState = downloadState
-    record.downloadProgress = progress.map { $0 / 100 }
-    record.localUri = downloadState == "downloaded" ? url.absoluteString : nil
-    record.isUploaded = item.value(
-      forAttribute: NSMetadataUbiquitousItemIsUploadedKey
-    ) as? Bool ?? false
-    return record
-  }
-
-  private func relativePath(for url: URL) -> String? {
-    let rootPath = documentsURL.path
-    let filePath = url.standardizedFileURL.path
-    let prefix = rootPath.hasSuffix("/") ? rootPath : rootPath + "/"
-    guard filePath.hasPrefix(prefix) else { return nil }
-    return String(filePath.dropFirst(prefix.count))
-  }
-}
-
 public final class PlayrICloudModule: Module {
-  private var activeQueries: [UUID: AudioMetadataQuery] = [:]
-
   public func definition() -> ModuleDefinition {
     Name("PlayrICloud")
 
@@ -214,25 +56,9 @@ public final class PlayrICloudModule: Module {
       try guide.write(to: guideURL, atomically: true, encoding: .utf8)
     }
 
-    AsyncFunction("listAudioFilesAsync") { (promise: Promise) in
-      do {
-        let documentsURL = try self.documentsURL()
-        let queryID = UUID()
-        let query = AudioMetadataQuery(documentsURL: documentsURL) { [weak self] result in
-          self?.activeQueries.removeValue(forKey: queryID)
-          switch result {
-          case .success(let files):
-            promise.resolve(files)
-          case .failure(let error):
-            promise.reject(makeICloudException(error.localizedDescription))
-          }
-        }
-        self.activeQueries[queryID] = query
-        query.start()
-      } catch {
-        promise.reject(makeICloudException(error.localizedDescription))
-      }
-    }.runOnQueue(.main)
+    AsyncFunction("listAudioFilesAsync") {
+      try self.listAudioFiles()
+    }
 
     AsyncFunction("requestDownloadsAsync") { (ids: [String]) in
       ids.map { id in
@@ -281,10 +107,25 @@ public final class PlayrICloudModule: Module {
       }
     }
 
-    OnDestroy {
-      self.activeQueries.values.forEach { $0.cancel() }
-      self.activeQueries.removeAll()
-    }
+  }
+
+  private func listAudioFiles() throws -> [ICloudAudioFileRecord] {
+    let documentsURL = try documentsURL()
+    let urls = try FileManager.default.contentsOfDirectory(
+      at: documentsURL,
+      includingPropertiesForKeys: nil,
+      options: [.skipsHiddenFiles]
+    )
+
+    return urls
+      .filter { supportedAudioExtensions.contains($0.pathExtension.lowercased()) }
+      .compactMap { try? audioFileRecord(for: $0.lastPathComponent) }
+      .sorted { left, right in
+        if left.modifiedAt == right.modifiedAt {
+          return left.name.localizedStandardCompare(right.name) == .orderedAscending
+        }
+        return (left.modifiedAt ?? 0) > (right.modifiedAt ?? 0)
+      }
   }
 
   private func documentsURL() throws -> URL {
