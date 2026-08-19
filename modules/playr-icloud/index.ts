@@ -3,3 +3,4 @@
 export { default } from './src/PlayrICloudModule';
 export * from './src/PlayrICloud.types';
 export * from './src/PlayrLibraryView';
+export * from './src/PlayrQueueView';

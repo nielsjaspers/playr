@@ -14,6 +14,7 @@ import { GlassIconButton, Icon, type Palette } from '../ui';
 import type { usePlayback } from '../usePlayback';
 import { formatDuration } from './EpisodeRow';
 import { getPlayerLayout } from './playerLayout';
+import type { RepeatMode } from '../playbackSequence';
 
 type PlaybackController = ReturnType<typeof usePlayback>;
 
@@ -73,11 +74,19 @@ export function PlayerModal({
   isVisible,
   palette,
   playback,
+  repeatMode,
+  shuffleEnabled,
+  onCycleRepeat,
+  onToggleShuffle,
   onClose,
 }: {
   isVisible: boolean;
   palette: Palette;
   playback: PlaybackController;
+  repeatMode: RepeatMode;
+  shuffleEnabled: boolean;
+  onCycleRepeat: () => void;
+  onToggleShuffle: () => void;
   onClose: () => void;
 }) {
   const viewport = useWindowDimensions();
@@ -153,6 +162,44 @@ export function PlayerModal({
                 size={52}
               />
             </View>
+
+            <View style={styles.playbackModes}>
+              <View style={styles.modeControl}>
+                <GlassIconButton
+                  label={shuffleEnabled ? 'Turn shuffle off' : 'Turn shuffle on'}
+                  name="shuffle"
+                  onPress={onToggleShuffle}
+                  palette={palette}
+                />
+                <View
+                  style={[
+                    styles.modeIndicator,
+                    { backgroundColor: shuffleEnabled ? palette.label : 'transparent' },
+                  ]}
+                />
+              </View>
+
+              <View style={styles.modeControl}>
+                <GlassIconButton
+                  label={
+                    repeatMode === 'off'
+                      ? 'Repeat off'
+                      : repeatMode === 'all'
+                        ? 'Repeat all'
+                        : 'Repeat one'
+                  }
+                  name={repeatMode === 'one' ? 'repeat.1' : 'repeat'}
+                  onPress={onCycleRepeat}
+                  palette={palette}
+                />
+                <View
+                  style={[
+                    styles.modeIndicator,
+                    { backgroundColor: repeatMode === 'off' ? 'transparent' : palette.label },
+                  ]}
+                />
+              </View>
+            </View>
           </View>
         </View>
       </SafeAreaView>
@@ -227,5 +274,21 @@ const styles = StyleSheet.create({
     gap: 32,
     justifyContent: 'center',
     marginTop: 24,
+  },
+  playbackModes: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    gap: 28,
+    justifyContent: 'center',
+    marginTop: 20,
+  },
+  modeControl: {
+    alignItems: 'center',
+  },
+  modeIndicator: {
+    borderRadius: 2,
+    height: 3,
+    marginTop: 5,
+    width: 3,
   },
 });

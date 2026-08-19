@@ -29,6 +29,7 @@ import {
   removeFromQueue as persistQueueRemoval,
   replaceLibraryCache,
   replaceLibraryOrder,
+  replaceQueue,
   replaceReversedFolderPaths,
   saveFolderOrderReversed,
   savePlaybackProgress,
@@ -395,6 +396,11 @@ export function usePlayrLibrary() {
     await persistQueueClear();
   }, []);
 
+  const reorderQueue = useCallback(async (fileIds: string[]) => {
+    setQueueIds(fileIds);
+    await replaceQueue(fileIds);
+  }, []);
+
   const clearError = useCallback(() => setError(null), []);
 
   return {
@@ -423,5 +429,6 @@ export function usePlayrLibrary() {
     addToQueue,
     removeFromQueue,
     clearQueue,
+    reorderQueue,
   };
 }

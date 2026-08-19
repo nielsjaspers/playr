@@ -196,6 +196,26 @@ export function usePlayback({
     [seekTo],
   );
 
+  const replay = useCallback(async () => {
+    const file = currentFileRef.current;
+    const duration = statusRef.current.duration;
+    if (!file || duration <= 0) return;
+
+    completedAtRef.current = null;
+    handledFinishRef.current = false;
+    lastSavedSecondRef.current = 0;
+    await playerRef.current.seekTo(0);
+    await onProgress({
+      fileId: file.id,
+      position: 0,
+      duration,
+      completedAt: null,
+      updatedAt: Date.now(),
+    });
+    playerRef.current.play();
+    playingRef.current = true;
+  }, [onProgress]);
+
   const stop = useCallback(async () => {
     await saveCurrent();
     playingRef.current = false;
@@ -219,6 +239,7 @@ export function usePlayback({
     toggle,
     seekTo,
     skip,
+    replay,
     stop,
   };
 }

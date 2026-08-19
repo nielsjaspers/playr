@@ -32,6 +32,7 @@ export type PlayrLibraryViewProps = {
   searchGlobally: boolean;
   isRefreshing: boolean;
   isReversed: boolean;
+  hasDownloadedFiles: boolean;
   currentFileId: string | null;
   isPlaying: boolean;
   removingIds: string[];
@@ -48,6 +49,7 @@ export type PlayrLibraryViewProps = {
   onMoveFiles: (event: MoveEvent) => void;
   onReorderFiles: (event: IdsEvent) => void;
   onOpenFolder: (event: PathEvent) => void;
+  onPlayFolder: () => void;
   onCreateFolder: () => void;
   onRenameFolder: () => void;
   onRemoveAllDownloads: () => void;

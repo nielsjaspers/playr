@@ -43,6 +43,7 @@ public final class PlayrLibraryViewProps: ExpoSwiftUI.ViewProps {
   @Field var searchGlobally: Bool = false
   @Field var isRefreshing: Bool = false
   @Field var isReversed: Bool = false
+  @Field var hasDownloadedFiles: Bool = false
   @Field var currentFileId: String?
   @Field var isPlaying: Bool = false
   @Field var removingIds: [String] = []
@@ -60,6 +61,7 @@ public final class PlayrLibraryViewProps: ExpoSwiftUI.ViewProps {
   var onMoveFiles = EventDispatcher()
   var onReorderFiles = EventDispatcher()
   var onOpenFolder = EventDispatcher()
+  var onPlayFolder = EventDispatcher()
   var onCreateFolder = EventDispatcher()
   var onRenameFolder = EventDispatcher()
   var onRemoveAllDownloads = EventDispatcher()
@@ -95,6 +97,28 @@ private struct PlayrSearchScopeModifier: ViewModifier {
       }
     } else {
       content
+    }
+  }
+}
+
+private struct PlayrSearchToolbarBehaviorModifier: ViewModifier {
+  @ViewBuilder
+  func body(content: Content) -> some View {
+    if #available(iOS 17.1, *) {
+      content.searchPresentationToolbarBehavior(.avoidHidingContent)
+    } else {
+      content
+    }
+  }
+}
+
+private struct PlayrGlassButtonModifier: ViewModifier {
+  @ViewBuilder
+  func body(content: Content) -> some View {
+    if #available(iOS 26.0, *) {
+      content.buttonStyle(.glass)
+    } else {
+      content.buttonStyle(.bordered)
     }
   }
 }
@@ -171,6 +195,8 @@ private struct PlayrFolderCard: View {
 private struct PlayrFolderHero: View {
   let name: String
   let itemCount: Int
+  let hasAudio: Bool
+  let onPlay: () -> Void
 
   var body: some View {
     VStack(spacing: 0) {
@@ -201,6 +227,17 @@ private struct PlayrFolderHero: View {
         .font(.subheadline)
         .foregroundStyle(.secondary)
         .padding(.top, 4)
+
+      if hasAudio {
+        Button(action: onPlay) {
+          Label("Play", systemImage: "play.fill")
+            .font(.headline)
+            .padding(.horizontal, 10)
+        }
+        .modifier(PlayrGlassButtonModifier())
+        .tint(.primary)
+        .padding(.top, 14)
+      }
     }
     .frame(maxWidth: .infinity)
     .padding(.vertical, 8)
@@ -217,7 +254,7 @@ private struct PlayrEpisodeRow: View {
     HStack(spacing: 12) {
       ZStack {
         Circle()
-          .fill(Color(uiColor: .secondarySystemFill))
+          .fill(Color.primary.opacity(0.10))
           .frame(width: 42, height: 42)
 
         if isRemoving || item.downloadState == "downloading" {
@@ -339,6 +376,7 @@ public struct PlayrLibraryView: ExpoSwiftUI.View, ExpoSwiftUI.WithHostingView {
           placement: .navigationBarDrawer(displayMode: .always),
           prompt: "Search audio titles"
         )
+        .modifier(PlayrSearchToolbarBehaviorModifier())
         .modifier(
           PlayrSearchScopeModifier(
             scope: $searchScope,
@@ -374,17 +412,13 @@ public struct PlayrLibraryView: ExpoSwiftUI.View, ExpoSwiftUI.WithHostingView {
         props.onSearchScopeChange(["global": global])
       }
     }
-    .confirmationDialog(
-      "Remove All Downloads?",
-      isPresented: $showsRemoveAllConfirmation,
-      titleVisibility: .visible
-    ) {
-      Button("Remove Downloads", role: .destructive) {
+    .alert("Remove local downloads?", isPresented: $showsRemoveAllConfirmation) {
+      Button("Remove", role: .destructive) {
         props.onRemoveAllDownloads()
       }
       Button("Cancel", role: .cancel) {}
     } message: {
-      Text("This removes local copies only. The files remain in iCloud Drive.")
+      Text("Files stay in iCloud Drive.")
     }
   }
 
@@ -426,7 +460,9 @@ public struct PlayrLibraryView: ExpoSwiftUI.View, ExpoSwiftUI.WithHostingView {
     if !props.currentFolderPath.isEmpty {
       PlayrFolderHero(
         name: props.title,
-        itemCount: props.directFiles.count + props.folders.count
+        itemCount: props.directFiles.count + props.folders.count,
+        hasAudio: !props.directFiles.isEmpty,
+        onPlay: { props.onPlayFolder() }
       )
       .listRowSeparator(.hidden)
       .listRowInsets(EdgeInsets(top: 4, leading: 16, bottom: 12, trailing: 16))
@@ -582,10 +618,11 @@ public struct PlayrLibraryView: ExpoSwiftUI.View, ExpoSwiftUI.WithHostingView {
       }
       .disabled(props.queuedIds.contains(item.id))
 
-      Button("Remove", systemImage: "trash", role: .destructive) {
-        props.onRemoveDownloads(["ids": [item.id]])
+      if item.downloadState == "downloaded" && !isRemoving {
+        Button("Remove", systemImage: "trash", role: .destructive) {
+          props.onRemoveDownloads(["ids": [item.id]])
+        }
       }
-      .disabled(item.downloadState != "downloaded" || isRemoving)
 
       Button("Move", systemImage: "arrow.up.arrow.down") {
         selection = [item.id]
@@ -598,22 +635,25 @@ public struct PlayrLibraryView: ExpoSwiftUI.View, ExpoSwiftUI.WithHostingView {
         }
       }
     }
-    .swipeActions(edge: .leading, allowsFullSwipe: false) {
+    .swipeActions(edge: .leading, allowsFullSwipe: true) {
       Button {
         props.onAddToQueue(["id": item.id])
       } label: {
         Label("Add to Queue", systemImage: "text.badge.plus")
       }
-      .tint(.primary)
+      .tint(Color(uiColor: .systemGray))
     }
     .swipeActions(edge: .trailing, allowsFullSwipe: true) {
-      Button(role: .destructive) {
-        props.onRemoveDownloads(["ids": [item.id]])
-      } label: {
-        Label("Remove", systemImage: "trash")
+      if item.downloadState == "downloaded" && !isRemoving {
+        Button(role: .destructive) {
+          props.onRemoveDownloads(["ids": [item.id]])
+        } label: {
+          Label("Remove", systemImage: "trash")
+        }
+        .tint(.red)
       }
-      .disabled(item.downloadState != "downloaded" || isRemoving)
     }
+    .id("\(item.id):\(item.downloadState):\(isRemoving)")
   }
 
   @ToolbarContentBuilder
@@ -662,8 +702,10 @@ public struct PlayrLibraryView: ExpoSwiftUI.View, ExpoSwiftUI.WithHostingView {
             withAnimation { editMode = .active }
           }
 
-          Button("Remove All Downloads", systemImage: "trash", role: .destructive) {
-            showsRemoveAllConfirmation = true
+          if props.hasDownloadedFiles {
+            Button("Remove All Downloads", systemImage: "trash", role: .destructive) {
+              showsRemoveAllConfirmation = true
+            }
           }
 
           Button("Refresh", systemImage: "arrow.clockwise") {
@@ -721,5 +763,168 @@ public struct PlayrLibraryView: ExpoSwiftUI.View, ExpoSwiftUI.WithHostingView {
   private func parentFolderPath(_ path: String) -> String {
     guard let separator = path.lastIndex(of: "/") else { return "" }
     return String(path[..<separator])
+  }
+}
+
+public final class PlayrQueueViewProps: ExpoSwiftUI.ViewProps {
+  @Field var currentFileId: String?
+  @Field var isPlaying: Bool = false
+  @Field var files: [PlayrLibraryAudioItemRecord] = []
+
+  var onOpenFile = EventDispatcher()
+  var onRemoveFromQueue = EventDispatcher()
+  var onReorder = EventDispatcher()
+  var onClear = EventDispatcher()
+}
+
+public struct PlayrQueueView: ExpoSwiftUI.View, ExpoSwiftUI.WithHostingView {
+  @ObservedObject public var props: PlayrQueueViewProps
+  @State private var editMode: EditMode = .inactive
+
+  public init(props: PlayrQueueViewProps) {
+    self.props = props
+  }
+
+  public var body: some View {
+    NavigationStack {
+      queueContent
+        .navigationTitle("Queue")
+        .navigationBarTitleDisplayMode(.large)
+        .toolbar { queueToolbar }
+        .environment(\.editMode, $editMode)
+        .tint(.primary)
+    }
+  }
+
+  private var queueContent: AnyView {
+    if props.files.isEmpty {
+      return AnyView(emptyQueueView)
+    }
+
+    if #available(iOS 27.0, *) {
+      return AnyView(reorderableQueue)
+    }
+
+    return AnyView(legacyQueue)
+  }
+
+  private var emptyQueueView: some View {
+    VStack(spacing: 10) {
+      Image(systemName: "text.badge.plus")
+        .font(.largeTitle)
+        .foregroundStyle(.secondary)
+      Text("Your queue is empty")
+        .font(.headline)
+      Text("Add audio from your library to play it in order.")
+        .font(.subheadline)
+        .foregroundStyle(.secondary)
+        .multilineTextAlignment(.center)
+    }
+    .frame(maxWidth: .infinity, maxHeight: .infinity)
+    .padding()
+  }
+
+  @available(iOS 27.0, *)
+  private var reorderableQueue: some View {
+    List {
+      ForEach(props.files, id: \.id) { item in
+        queueRow(item)
+      }
+      .reorderable()
+    }
+    .reorderContainer(
+      for: PlayrLibraryAudioItemRecord.self,
+      itemID: \.id
+    ) { difference in
+      applyReorder(difference)
+    }
+    .listStyle(.plain)
+    .scrollContentBackground(.hidden)
+    .background(Color(uiColor: .systemBackground))
+  }
+
+  private var legacyQueue: some View {
+    List {
+      ForEach(props.files, id: \.id) { item in
+        queueRow(item)
+      }
+      .onMove(perform: reorderFiles)
+    }
+    .listStyle(.plain)
+    .scrollContentBackground(.hidden)
+    .background(Color(uiColor: .systemBackground))
+  }
+
+  private func queueRow(_ item: PlayrLibraryAudioItemRecord) -> some View {
+    PlayrEpisodeRow(
+      item: item,
+      isCurrent: props.currentFileId == item.id,
+      isPlaying: props.isPlaying,
+      isRemoving: false
+    )
+    .contentShape(Rectangle())
+    .onTapGesture {
+      props.onOpenFile(["id": item.id])
+    }
+    .contextMenu {
+      Button("Remove from Queue", systemImage: "trash", role: .destructive) {
+        props.onRemoveFromQueue(["id": item.id])
+      }
+    }
+    .swipeActions(edge: .trailing, allowsFullSwipe: true) {
+      Button(role: .destructive) {
+        props.onRemoveFromQueue(["id": item.id])
+      } label: {
+        Label("Remove", systemImage: "trash")
+      }
+      .tint(.red)
+    }
+  }
+
+  @ToolbarContentBuilder
+  private var queueToolbar: some ToolbarContent {
+    if !props.files.isEmpty {
+      ToolbarItem(placement: .topBarTrailing) {
+        Menu {
+          Button("Clear Queue", systemImage: "trash", role: .destructive) {
+            props.onClear()
+          }
+
+          if #unavailable(iOS 27.0) {
+            EditButton()
+          }
+        } label: {
+          Image(systemName: "ellipsis")
+        }
+        .menuOrder(.fixed)
+        .accessibilityLabel("Queue actions")
+      }
+    }
+  }
+
+  @available(iOS 27.0, *)
+  private func applyReorder(
+    _ difference: ReorderDifference<String, ReorderableSingleCollectionIdentifier>
+  ) {
+    var ids = props.files.map(\.id)
+    let sourceSet = Set(difference.sources)
+    let movingIds = ids.filter(sourceSet.contains)
+    ids.removeAll(where: sourceSet.contains)
+
+    switch difference.destination.position {
+    case .before(let destinationID):
+      let destinationIndex = ids.firstIndex(of: destinationID) ?? ids.endIndex
+      ids.insert(contentsOf: movingIds, at: destinationIndex)
+    case .end:
+      ids.append(contentsOf: movingIds)
+    }
+
+    props.onReorder(["ids": ids])
+  }
+
+  private func reorderFiles(fromOffsets: IndexSet, toOffset: Int) {
+    var ids = props.files.map(\.id)
+    ids.move(fromOffsets: fromOffsets, toOffset: toOffset)
+    props.onReorder(["ids": ids])
   }
 }

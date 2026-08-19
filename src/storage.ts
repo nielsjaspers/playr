@@ -215,6 +215,20 @@ export async function clearQueue() {
   await database.runAsync('DELETE FROM queue_items');
 }
 
+export async function replaceQueue(fileIds: string[]) {
+  const database = await getDatabase();
+  await database.withExclusiveTransactionAsync(async (transaction) => {
+    await transaction.runAsync('DELETE FROM queue_items');
+    for (const [position, fileId] of fileIds.entries()) {
+      await transaction.runAsync(
+        'INSERT INTO queue_items (file_id, position) VALUES (?, ?)',
+        fileId,
+        position,
+      );
+    }
+  });
+}
+
 export async function getLibraryOrder() {
   const database = await getDatabase();
   const rows = await database.getAllAsync<OrderRow>(

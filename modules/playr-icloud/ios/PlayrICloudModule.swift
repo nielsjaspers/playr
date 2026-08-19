@@ -41,6 +41,7 @@ public final class PlayrICloudModule: Module {
     Name("PlayrICloud")
 
     View(PlayrLibraryView.self)
+    View(PlayrQueueView.self)
 
     AsyncFunction("getAvailabilityAsync") {
       if FileManager.default.ubiquityIdentityToken == nil {

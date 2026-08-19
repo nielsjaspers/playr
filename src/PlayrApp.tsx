@@ -1,42 +1,26 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
+  Animated,
   Alert,
+  PanResponder,
   Pressable,
-  SafeAreaView,
   StyleSheet,
   Text,
   useColorScheme,
   View,
 } from 'react-native';
 import { StatusBar } from 'expo-status-bar';
-import {
-  Button,
-  Host,
-  List,
-  RNHostView,
-  Spacer,
-  SwipeActions,
-  TabView,
-  VStack,
-} from '@expo/ui/swift-ui';
-import {
-  frame,
-  labelStyle,
-  listRowBackground,
-  listRowInsets,
-  listRowSeparator,
-  listStyle,
-  scrollContentBackground,
-  tabViewStyle,
-} from '@expo/ui/swift-ui/modifiers';
+import { Host, RNHostView, TabView } from '@expo/ui/swift-ui';
+import { labelStyle, tabViewStyle } from '@expo/ui/swift-ui/modifiers';
 
 import {
   PlayrLibraryView,
+  PlayrQueueView,
   type ICloudAudioFile,
   type PlayrLibraryAudioItem,
 } from '../modules/playr-icloud';
-import { EpisodeRow, formatDuration } from './components/EpisodeRow';
+import { formatDuration } from './components/EpisodeRow';
 import { PlayerModal } from './components/PlayerModal';
 import {
   getContinueListeningFiles,
@@ -48,23 +32,20 @@ import {
   searchAudioTitles,
 } from './libraryOrganization';
 import { getEpisodePressIntent } from './playbackIntent';
+import {
+  createPlaybackOrder,
+  createPlaybackSequence,
+  cycleRepeatMode,
+  getAdjacentPlaybackId,
+  getCompletionTarget,
+  type PlaybackSequence,
+  type RepeatMode,
+} from './playbackSequence';
 import { usePlayback } from './usePlayback';
 import { usePlayrLibrary } from './usePlayrLibrary';
 import { createPalette, GlassPanel, Icon, type Palette } from './ui';
 
 type Screen = 'library' | 'queue';
-
-function QueueEmptyState({ palette }: { palette: Palette }) {
-  return (
-    <View style={styles.emptyState}>
-      <Icon name="text.badge.plus" color={palette.tertiaryLabel} size={36} />
-      <Text style={[styles.emptyTitle, { color: palette.label }]}>Your queue is empty</Text>
-      <Text style={[styles.emptyBody, { color: palette.secondaryLabel }]}>
-        Add files from your library to play them in order.
-      </Text>
-    </View>
-  );
-}
 
 export default function PlayrApp() {
   const isDark = useColorScheme() === 'dark';
@@ -73,32 +54,67 @@ export default function PlayrApp() {
   const [screen, setScreen] = useState<Screen>('library');
   const [isPlayerOpen, setIsPlayerOpen] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
-  const [queueCloudPrompt, setQueueCloudPrompt] = useState<ICloudAudioFile | null>(null);
+  const [cloudPlaybackPrompt, setCloudPlaybackPrompt] = useState<ICloudAudioFile | null>(null);
   const [currentFolderPath, setCurrentFolderPath] = useState(ROOT_FOLDER_PATH);
   const [searchQuery, setSearchQuery] = useState('');
   const [searchGlobally, setSearchGlobally] = useState(false);
+  const [playbackSequence, setPlaybackSequence] = useState<PlaybackSequence | null>(null);
+  const [repeatMode, setRepeatMode] = useState<RepeatMode>('off');
+  const [shuffleEnabled, setShuffleEnabled] = useState(false);
   const filesRef = useRef(library.files);
   const queueIdsRef = useRef(library.queueIds);
+  const playbackSequenceRef = useRef(playbackSequence);
+  const repeatModeRef = useRef(repeatMode);
+  const shuffleEnabledRef = useRef(shuffleEnabled);
   const playbackRef = useRef<ReturnType<typeof usePlayback> | null>(null);
+  const miniPlayerTranslation = useRef(new Animated.Value(0)).current;
 
   useEffect(() => {
     filesRef.current = library.files;
     queueIdsRef.current = library.queueIds;
   }, [library.files, library.queueIds]);
 
+  useEffect(() => {
+    playbackSequenceRef.current = playbackSequence;
+  }, [playbackSequence]);
+
+  useEffect(() => {
+    repeatModeRef.current = repeatMode;
+  }, [repeatMode]);
+
+  useEffect(() => {
+    shuffleEnabledRef.current = shuffleEnabled;
+  }, [shuffleEnabled]);
+
+  const updatePlaybackSequence = useCallback((sequence: PlaybackSequence | null) => {
+    playbackSequenceRef.current = sequence;
+    setPlaybackSequence(sequence);
+  }, []);
+
   const handleFinished = useCallback(
     (fileId: string) => {
-      const remainingQueue = queueIdsRef.current.filter((id) => id !== fileId);
-      if (queueIdsRef.current.includes(fileId)) void library.removeFromQueue(fileId);
-      const nextFile = filesRef.current.find((file) => file.id === remainingQueue[0]);
+      const sequence = playbackSequenceRef.current;
+      if (!sequence) return;
+      const targetId = getCompletionTarget(
+        sequence.playOrderIds,
+        fileId,
+        repeatModeRef.current,
+      );
+      if (!targetId) return;
+      if (targetId === fileId) {
+        void playbackRef.current?.replay();
+        return;
+      }
+
+      const nextFile = filesRef.current.find((file) => file.id === targetId);
       if (!nextFile) return;
       if (nextFile.downloadState === 'downloaded' && nextFile.localUri) {
         void playbackRef.current?.play(nextFile);
       } else {
-        setQueueCloudPrompt(nextFile);
+        setCloudPlaybackPrompt(nextFile);
       }
     },
-    [library.removeFromQueue],
+    [],
   );
 
   const playback = usePlayback({
@@ -142,18 +158,18 @@ export default function PlayrApp() {
   );
 
   useEffect(() => {
-    if (!queueCloudPrompt) return;
-    const file = queueCloudPrompt;
-    setQueueCloudPrompt(null);
+    if (!cloudPlaybackPrompt) return;
+    const file = cloudPlaybackPrompt;
+    setCloudPlaybackPrompt(null);
     Alert.alert(
       'Next item is in iCloud',
-      `Download “${file.name}” and continue the queue?`,
+      `Download “${file.name}” and continue playback?`,
       [
         { text: 'Not Now', style: 'cancel' },
         { text: 'Download', onPress: () => void downloadAndMaybePlay(file, true) },
       ],
     );
-  }, [downloadAndMaybePlay, queueCloudPrompt]);
+  }, [cloudPlaybackPrompt, downloadAndMaybePlay]);
 
   const openFile = useCallback(
     async (file: ICloudAudioFile) => {
@@ -265,8 +281,29 @@ export default function PlayrApp() {
     );
   }, [currentFolderPath, library.folders, library.renameFolder, playback.currentFile, playback.stop]);
 
-  const pressEpisode = useCallback(
+  const sequenceForFolderFile = useCallback(
     (file: ICloudAudioFile) => {
+      const folderPath = parentFolderPath(file.relativePath);
+      const folderFiles = orderFiles(
+        library.files.filter((item) => isDirectChild(item.relativePath, folderPath)),
+        folderPath,
+        library.orderByFolder,
+        library.reversedFolderPaths.has(folderPath),
+      );
+      return createPlaybackSequence(
+        'folder',
+        folderFiles.map((item) => item.id),
+        folderPath,
+        file.id,
+        shuffleEnabledRef.current,
+      );
+    },
+    [library.files, library.orderByFolder, library.reversedFolderPaths],
+  );
+
+  const pressEpisode = useCallback(
+    (file: ICloudAudioFile, sequence: PlaybackSequence) => {
+      updatePlaybackSequence(sequence);
       const intent = getEpisodePressIntent(file.id, playback.currentFile?.id ?? null);
       if (intent === 'toggle') {
         playback.toggle();
@@ -274,13 +311,125 @@ export default function PlayrApp() {
       }
       void openFile(file);
     },
-    [openFile, playback.currentFile?.id, playback.toggle],
+    [openFile, playback.currentFile?.id, playback.toggle, updatePlaybackSequence],
+  );
+
+  const playFolder = useCallback(
+    (folderPath: string, files: ICloudAudioFile[]) => {
+      if (files.length === 0) return;
+      const sequence = createPlaybackSequence(
+        'folder',
+        files.map((file) => file.id),
+        folderPath,
+        null,
+        shuffleEnabledRef.current,
+      );
+      const firstId = sequence.playOrderIds[0];
+      const firstFile = files.find((file) => file.id === firstId);
+      if (!firstFile) return;
+      updatePlaybackSequence(sequence);
+      void openFile(firstFile);
+    },
+    [openFile, updatePlaybackSequence],
+  );
+
+  const playQueueFile = useCallback(
+    (file: ICloudAudioFile) => {
+      pressEpisode(
+        file,
+        createPlaybackSequence(
+          'queue',
+          queueIdsRef.current,
+          null,
+          file.id,
+          shuffleEnabledRef.current,
+        ),
+      );
+    },
+    [pressEpisode],
+  );
+
+  const playAdjacent = useCallback(
+    (direction: 'next' | 'previous') => {
+      const currentFile = playbackRef.current?.currentFile;
+      const sequence = playbackSequenceRef.current;
+      if (!currentFile || !sequence) return;
+      const targetId = getAdjacentPlaybackId(
+        sequence.playOrderIds,
+        currentFile.id,
+        direction,
+        repeatModeRef.current === 'all',
+      );
+      if (!targetId) return;
+      const targetFile = filesRef.current.find((file) => file.id === targetId);
+      if (targetFile) void openFile(targetFile);
+    },
+    [openFile],
+  );
+
+  const toggleShuffle = useCallback(() => {
+    const nextShuffleEnabled = !shuffleEnabledRef.current;
+    shuffleEnabledRef.current = nextShuffleEnabled;
+    setShuffleEnabled(nextShuffleEnabled);
+
+    const sequence = playbackSequenceRef.current;
+    if (!sequence) return;
+    updatePlaybackSequence({
+      ...sequence,
+      playOrderIds: createPlaybackOrder(
+        sequence.baseIds,
+        playbackRef.current?.currentFile?.id ?? null,
+        nextShuffleEnabled,
+      ),
+    });
+  }, [updatePlaybackSequence]);
+
+  const advanceRepeatMode = useCallback(() => {
+    const nextMode = cycleRepeatMode(repeatModeRef.current);
+    repeatModeRef.current = nextMode;
+    setRepeatMode(nextMode);
+  }, []);
+
+  const miniPlayerPanResponder = useMemo(
+    () =>
+      PanResponder.create({
+        onMoveShouldSetPanResponder: (_, gesture) =>
+          Math.abs(gesture.dx) > 12 && Math.abs(gesture.dx) > Math.abs(gesture.dy),
+        onPanResponderMove: (_, gesture) => {
+          miniPlayerTranslation.setValue(gesture.dx * 0.45);
+        },
+        onPanResponderRelease: (_, gesture) => {
+          if (gesture.dx <= -64) playAdjacent('next');
+          if (gesture.dx >= 64) playAdjacent('previous');
+          Animated.spring(miniPlayerTranslation, {
+            toValue: 0,
+            damping: 18,
+            stiffness: 180,
+            useNativeDriver: true,
+          }).start();
+        },
+        onPanResponderTerminate: () => {
+          Animated.spring(miniPlayerTranslation, {
+            toValue: 0,
+            damping: 18,
+            stiffness: 180,
+            useNativeDriver: true,
+          }).start();
+        },
+      }),
+    [miniPlayerTranslation, playAdjacent],
   );
 
   const renderMiniPlayer = () => {
     if (!playback.currentFile) return null;
     return (
-      <View style={styles.miniPlayerPosition}>
+      <Animated.View
+        {...miniPlayerPanResponder.panHandlers}
+        style={[
+          styles.miniPlayerPosition,
+          { transform: [{ translateX: miniPlayerTranslation }] },
+        ]}
+      >
         <GlassPanel palette={palette} style={styles.miniPlayer}>
           <Pressable
             accessibilityLabel="Open now playing"
@@ -315,7 +464,7 @@ export default function PlayrApp() {
             />
           </Pressable>
         </GlassPanel>
-      </View>
+      </Animated.View>
     );
   };
 
@@ -393,6 +542,9 @@ export default function PlayrApp() {
             currentFolderPath={currentFolderPath}
             directFiles={directFiles.map((file) => nativeItem(file))}
             folders={childFolders}
+            hasDownloadedFiles={library.files.some(
+              (file) => file.downloadState === 'downloaded',
+            )}
             isPlaying={playback.status.playing}
             isRefreshing={library.isRefreshing}
             isReversed={isReversed}
@@ -419,13 +571,14 @@ export default function PlayrApp() {
             }}
             onOpenFile={({ nativeEvent }) => {
               const file = library.files.find((item) => item.id === nativeEvent.id);
-              if (file) pressEpisode(file);
+              if (file) pressEpisode(file, sequenceForFolderFile(file));
             }}
             onOpenFolder={({ nativeEvent }) => {
               setCurrentFolderPath(nativeEvent.path);
               setSearchQuery('');
               setSearchGlobally(false);
             }}
+            onPlayFolder={() => playFolder(currentFolderPath, directFiles)}
             onRefresh={() => void library.refresh()}
             onRemoveAllDownloads={() => {
               const ids = library.files
@@ -467,17 +620,24 @@ export default function PlayrApp() {
       .map((id) => library.files.find((file) => file.id === id))
       .filter((file): file is ICloudAudioFile => file != null);
 
-    return (
-      <SafeAreaView style={[styles.safeArea, { backgroundColor: palette.background }]}>
-        <View style={styles.headerRow}>
-          <Text style={[styles.largeTitle, { color: palette.label }]}>Queue</Text>
-          {library.queueIds.length > 0 ? (
-            <Pressable onPress={() => void library.clearQueue()}>
-              <Text style={[styles.clearButton, { color: palette.destructive }]}>Clear</Text>
-            </Pressable>
-          ) : null}
-        </View>
+    const nativeQueueFiles: PlayrLibraryAudioItem[] = queueFiles.map((file) => {
+      const progress = library.progressById.get(file.id);
+      return {
+        id: file.id,
+        name: file.name,
+        relativePath: file.relativePath,
+        size: file.size,
+        downloadState: file.downloadState,
+        downloadProgress: file.downloadProgress,
+        progressPosition: progress?.position ?? null,
+        progressDuration: progress?.duration ?? null,
+        completedAt: progress?.completedAt ?? null,
+        contextLabel: parentFolderPath(file.relativePath) || 'Library',
+      };
+    });
 
+    return (
+      <View style={[styles.safeArea, { backgroundColor: palette.background }]}>
         {library.availability !== 'available' ? (
           <View style={styles.icloudUnavailable}>
             <Icon name="icloud.slash" color={palette.secondaryLabel} size={30} />
@@ -487,61 +647,55 @@ export default function PlayrApp() {
           </View>
         ) : library.isLoading ? (
           <ActivityIndicator color={palette.secondaryLabel} style={styles.loading} />
-        ) : queueFiles.length === 0 ? (
-          <QueueEmptyState palette={palette} />
         ) : (
-          <Host
-            colorScheme={isDark ? 'dark' : 'light'}
-            seedColor={palette.label}
-            style={[styles.episodeListHost, { backgroundColor: palette.background }]}
-          >
-            <List modifiers={[listStyle('plain'), scrollContentBackground('hidden')]}>
-              {queueFiles.map((item) => (
-                <SwipeActions
-                  key={item.id}
-                  modifiers={[
-                    listRowBackground(palette.background),
-                    listRowInsets({ top: 0, leading: 16, bottom: 0, trailing: 16 }),
-                  ]}
-                >
-                  <VStack modifiers={[frame({ minHeight: 72 })]}>
-                    <RNHostView>
-                      <EpisodeRow
-                        file={item}
-                        isCurrent={playback.currentFile?.id === item.id}
-                        isPlaying={playback.status.playing}
-                        isRemoving={library.removingIds.has(item.id)}
-                        isSelected={false}
-                        isSelecting={false}
-                        onPress={() => pressEpisode(item)}
-                        onToggleSelection={() => undefined}
-                        palette={palette}
-                        progress={library.progressById.get(item.id)}
-                      />
-                    </RNHostView>
-                  </VStack>
-                  <SwipeActions.Actions edge="trailing">
-                    <Button
-                      label="Remove"
-                      systemImage="trash"
-                      role="destructive"
-                      onPress={() => void library.removeFromQueue(item.id)}
-                    />
-                  </SwipeActions.Actions>
-                </SwipeActions>
-              ))}
-              <Spacer
-                modifiers={[
-                  frame({ height: playback.currentFile ? 104 : 20 }),
-                  listRowBackground(palette.background),
-                  listRowSeparator('hidden'),
-                ]}
-              />
-            </List>
-          </Host>
+          <PlayrQueueView
+            currentFileId={playback.currentFile?.id ?? null}
+            files={nativeQueueFiles}
+            isPlaying={playback.status.playing}
+            onClear={() => {
+              if (playbackSequenceRef.current?.kind === 'queue') updatePlaybackSequence(null);
+              void library.clearQueue();
+            }}
+            onOpenFile={({ nativeEvent }) => {
+              const file = library.files.find((item) => item.id === nativeEvent.id);
+              if (file) playQueueFile(file);
+            }}
+            onRemoveFromQueue={({ nativeEvent }) => {
+              if (playbackSequenceRef.current?.kind === 'queue') {
+                const remainingIds = playbackSequenceRef.current.baseIds.filter(
+                  (id) => id !== nativeEvent.id,
+                );
+                updatePlaybackSequence(
+                  createPlaybackSequence(
+                    'queue',
+                    remainingIds,
+                    null,
+                    playback.currentFile?.id ?? null,
+                    shuffleEnabledRef.current,
+                  ),
+                );
+              }
+              void library.removeFromQueue(nativeEvent.id);
+            }}
+            onReorder={({ nativeEvent }) => {
+              if (playbackSequenceRef.current?.kind === 'queue') {
+                updatePlaybackSequence(
+                  createPlaybackSequence(
+                    'queue',
+                    nativeEvent.ids,
+                    null,
+                    playback.currentFile?.id ?? null,
+                    shuffleEnabledRef.current,
+                  ),
+                );
+              }
+              void library.reorderQueue(nativeEvent.ids);
+            }}
+            style={styles.nativeQueueView}
+          />
         )}
         {renderMiniPlayer()}
-      </SafeAreaView>
+      </View>
     );
   };
 
@@ -572,9 +726,13 @@ export default function PlayrApp() {
 
       <PlayerModal
         isVisible={isPlayerOpen}
+        onCycleRepeat={advanceRepeatMode}
         onClose={() => setIsPlayerOpen(false)}
+        onToggleShuffle={toggleShuffle}
         palette={palette}
         playback={playback}
+        repeatMode={repeatMode}
+        shuffleEnabled={shuffleEnabled}
       />
     </View>
   );
@@ -585,6 +743,7 @@ const styles = StyleSheet.create({
   tabHost: { flex: 1 },
   safeArea: { flex: 1 },
   nativeLibraryView: { flex: 1 },
+  nativeQueueView: { flex: 1 },
   headerRow: {
     alignItems: 'center',
     flexDirection: 'row',
