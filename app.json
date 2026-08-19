@@ -8,6 +8,28 @@
     "userInterfaceStyle": "light",
     "ios": {
       "bundleIdentifier": "com.nielsjaspers.playr",
+      "buildNumber": "1",
+      "entitlements": {
+        "com.apple.developer.icloud-container-identifiers": [
+          "iCloud.com.nielsjaspers.playr"
+        ],
+        "com.apple.developer.icloud-services": [
+          "CloudDocuments"
+        ],
+        "com.apple.developer.ubiquity-container-identifiers": [
+          "iCloud.com.nielsjaspers.playr"
+        ],
+        "com.apple.developer.ubiquity-kvstore-identifier": "$(TeamIdentifierPrefix)com.nielsjaspers.playr"
+      },
+      "infoPlist": {
+        "NSUbiquitousContainers": {
+          "iCloud.com.nielsjaspers.playr": {
+            "NSUbiquitousContainerIsDocumentScopePublic": true,
+            "NSUbiquitousContainerName": "Playr",
+            "NSUbiquitousContainerSupportedFolderLevels": "Any"
+          }
+        }
+      },
       "supportsTablet": false
     },
     "android": {
