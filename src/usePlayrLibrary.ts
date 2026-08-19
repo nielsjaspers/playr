@@ -5,6 +5,8 @@ import PlayrICloud, {
   type ICloudAudioFile,
   type ICloudAvailability,
 } from '../modules/playr-icloud';
+import { mergeListedFiles, replaceVerifiedFiles } from './libraryFiles';
+import { formatRemovalFailure, removeDownloadsWithLockRetry } from './removal';
 import {
   addToQueue as persistQueueItem,
   clearQueue as persistQueueClear,
@@ -26,11 +28,6 @@ function wait(milliseconds: number) {
   return new Promise<void>((resolve) => setTimeout(resolve, milliseconds));
 }
 
-function replaceFiles(current: ICloudAudioFile[], replacements: ICloudAudioFile[]) {
-  const byId = new Map(replacements.map((file) => [file.id, file]));
-  return current.map((file) => byId.get(file.id) ?? file);
-}
-
 export function usePlayrLibrary() {
   const [files, setFiles] = useState<ICloudAudioFile[]>([]);
   const [progressById, setProgressById] = useState<Map<string, PlaybackProgress>>(new Map());
@@ -39,6 +36,7 @@ export function usePlayrLibrary() {
   const [isLoading, setIsLoading] = useState(true);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [removingIds, setRemovingIds] = useState<Set<string>>(new Set());
   const filesRef = useRef(files);
   const hasInitialized = useRef(false);
 
@@ -91,7 +89,10 @@ export function usePlayrLibrary() {
       if (nextAvailability !== 'available') return;
 
       await PlayrICloud.ensureLibraryAsync();
-      const listedFiles = await PlayrICloud.listAudioFilesAsync();
+      const listedFiles = mergeListedFiles(
+        filesRef.current,
+        await PlayrICloud.listAudioFilesAsync(),
+      );
       const cleanedFiles = await removeOverdueDownloads(listedFiles);
       applyFiles(cleanedFiles);
       await replaceLibraryCache(cleanedFiles);
@@ -168,7 +169,7 @@ export function usePlayrLibrary() {
     for (let attempt = 0; attempt < DOWNLOAD_POLL_LIMIT && pendingIds.length > 0; attempt += 1) {
       await wait(DOWNLOAD_POLL_INTERVAL_MS);
       const updatedFiles = await PlayrICloud.getAudioFilesAsync(pendingIds);
-      applyFiles(replaceFiles(filesRef.current, updatedFiles));
+      applyFiles(replaceVerifiedFiles(filesRef.current, updatedFiles));
       downloadedFiles.push(
         ...updatedFiles.filter((file) => file.downloadState === 'downloaded'),
       );
@@ -186,28 +187,42 @@ export function usePlayrLibrary() {
   const verifyFile = useCallback(async (id: string) => {
     const [verifiedFile] = await PlayrICloud.getAudioFilesAsync([id]);
     if (!verifiedFile) return null;
-    const nextFiles = replaceFiles(filesRef.current, [verifiedFile]);
+    const nextFiles = replaceVerifiedFiles(filesRef.current, [verifiedFile]);
     applyFiles(nextFiles);
     void replaceLibraryCache(nextFiles);
     return verifiedFile;
   }, [applyFiles]);
 
   const removeDownloads = useCallback(async (ids: string[]) => {
-    const results = await PlayrICloud.removeDownloadsAsync(ids);
-    const removedIds = new Set(
-      results.filter((result) => result.succeeded).map((result) => result.id),
-    );
-    const nextFiles = filesRef.current.map((file) =>
-      removedIds.has(file.id)
-        ? { ...file, downloadState: 'inCloud' as const, downloadProgress: null, localUri: null }
-        : file,
-    );
-    applyFiles(nextFiles);
-    await replaceLibraryCache(nextFiles);
+    setError(null);
+    setRemovingIds(new Set(ids));
+    try {
+      const results = await removeDownloadsWithLockRetry(
+        ids,
+        (retryIds) => PlayrICloud.removeDownloadsAsync(retryIds),
+      );
+      const verifiedFiles = await PlayrICloud.getAudioFilesAsync(ids);
+      const nextFiles = replaceVerifiedFiles(filesRef.current, verifiedFiles);
+      applyFiles(nextFiles);
+      await replaceLibraryCache(nextFiles);
 
-    const failure = results.find((result) => !result.succeeded);
-    if (failure) setError(failure.error ?? 'A local download could not be removed.');
-    return [...removedIds];
+      const failure = results.find((result) => !result.succeeded);
+      if (failure) setError(formatRemovalFailure(failure.error));
+      return verifiedFiles
+        .filter(
+          (file) => file.metadataAvailable !== false && file.downloadState === 'inCloud',
+        )
+        .map((file) => file.id);
+    } catch (caughtError) {
+      setError(
+        caughtError instanceof Error
+          ? caughtError.message
+          : 'The local download could not be removed. The audio file is still downloaded.',
+      );
+      return [];
+    } finally {
+      setRemovingIds(new Set());
+    }
   }, [applyFiles]);
 
   const updateProgress = useCallback(async (nextProgress: PlaybackProgress) => {
@@ -231,6 +246,8 @@ export function usePlayrLibrary() {
     await persistQueueClear();
   }, []);
 
+  const clearError = useCallback(() => setError(null), []);
+
   return {
     files,
     progressById,
@@ -239,7 +256,8 @@ export function usePlayrLibrary() {
     isLoading,
     isRefreshing,
     error,
-    clearError: () => setError(null),
+    removingIds,
+    clearError,
     refresh,
     verifyFile,
     download,

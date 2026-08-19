@@ -37,7 +37,7 @@ export function createPalette(isDark: boolean): Palette {
         fill: 'rgba(118, 118, 128, 0.24)',
       }
     : {
-        background: '#F2F2F7',
+        background: '#FFFFFF',
         surface: '#FFFFFF',
         raisedSurface: '#FFFFFF',
         label: '#000000',
@@ -135,7 +135,7 @@ export function GlassIconButton({
     ? palette.tertiaryLabel
     : destructive
       ? palette.destructive
-      : palette.accent;
+      : palette.label;
   const content = (
     <View style={[styles.buttonContent, { width: size, height: size }]}>
       <Icon name={name} color={color} size={size >= 50 ? 24 : 19} />

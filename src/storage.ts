@@ -92,6 +92,7 @@ export async function getCachedLibrary(): Promise<ICloudAudioFile[]> {
     downloadProgress: row.download_progress,
     localUri: row.local_uri,
     isUploaded: row.is_uploaded === 1,
+    metadataAvailable: true,
   }));
 }
 

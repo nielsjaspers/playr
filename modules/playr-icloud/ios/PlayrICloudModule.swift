@@ -13,6 +13,7 @@ private struct ICloudAudioFileRecord: Record {
   @Field var downloadProgress: Double?
   @Field var localUri: String?
   @Field var isUploaded: Bool = false
+  @Field var metadataAvailable: Bool = true
 }
 
 private struct ICloudFileOperationRecord: Record {
@@ -73,8 +74,14 @@ public final class PlayrICloudModule: Module {
     }
 
     AsyncFunction("getAudioFilesAsync") { (ids: [String]) in
-      ids.compactMap { id in
-        try? self.audioFileRecord(for: id)
+      ids.compactMap { id -> ICloudAudioFileRecord? in
+        guard
+          let url = try? self.audioURL(for: id),
+          FileManager.default.fileExists(atPath: url.path)
+        else {
+          return nil
+        }
+        return (try? self.audioFileRecord(for: id)) ?? self.fallbackAudioFileRecord(for: url)
       }
     }
 
@@ -119,7 +126,9 @@ public final class PlayrICloudModule: Module {
 
     return urls
       .filter { supportedAudioExtensions.contains($0.pathExtension.lowercased()) }
-      .compactMap { try? audioFileRecord(for: $0.lastPathComponent) }
+      .map { url in
+        (try? audioFileRecord(for: url.lastPathComponent)) ?? fallbackAudioFileRecord(for: url)
+      }
       .sorted { left, right in
         if left.modifiedAt == right.modifiedAt {
           return left.name.localizedStandardCompare(right.name) == .orderedAscending
@@ -197,6 +206,17 @@ public final class PlayrICloudModule: Module {
     record.downloadProgress = nil
     record.localUri = downloadState == "downloaded" ? url.absoluteString : nil
     record.isUploaded = values.ubiquitousItemIsUploaded ?? false
+    record.metadataAvailable = true
+    return record
+  }
+
+  private func fallbackAudioFileRecord(for url: URL) -> ICloudAudioFileRecord {
+    var record = ICloudAudioFileRecord()
+    record.id = url.lastPathComponent
+    record.name = url.deletingPathExtension().lastPathComponent
+    record.relativePath = url.lastPathComponent
+    record.downloadState = "inCloud"
+    record.metadataAvailable = false
     return record
   }
 

@@ -1,12 +1,13 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { AppState } from 'react-native';
 import {
+  createAudioPlayer,
   setAudioModeAsync,
-  useAudioPlayer,
   useAudioPlayerStatus,
 } from 'expo-audio';
 
 import type { ICloudAudioFile } from '../modules/playr-icloud';
+import { releaseAudioPlayer } from './audioPlayerLifecycle';
 import type { PlaybackProgress } from './storage';
 
 type PlaybackOptions = {
@@ -16,20 +17,30 @@ type PlaybackOptions = {
   onError: (message: string) => void;
 };
 
+function wait(milliseconds: number) {
+  return new Promise<void>((resolve) => setTimeout(resolve, milliseconds));
+}
+
+function createPlaybackPlayer() {
+  return createAudioPlayer(null, {
+    updateInterval: 1_000,
+    keepAudioSessionActive: true,
+  });
+}
+
 export function usePlayback({
   progressById,
   onProgress,
   onFinished,
   onError,
 }: PlaybackOptions) {
-  const player = useAudioPlayer(null, {
-    updateInterval: 1_000,
-    keepAudioSessionActive: true,
-  });
+  const [player, setPlayer] = useState(createPlaybackPlayer);
+  const playerRef = useRef(player);
   const status = useAudioPlayerStatus(player);
   const [currentFile, setCurrentFile] = useState<ICloudAudioFile | null>(null);
   const currentFileRef = useRef(currentFile);
   const statusRef = useRef(status);
+  const playingRef = useRef(status.playing);
   const completedAtRef = useRef<number | null>(null);
   const lastSavedSecondRef = useRef(0);
   const handledFinishRef = useRef(false);
@@ -41,11 +52,19 @@ export function usePlayback({
 
   useEffect(() => {
     statusRef.current = status;
+    playingRef.current = status.playing;
   }, [status]);
 
   useEffect(() => {
     onFinishedRef.current = onFinished;
   }, [onFinished]);
+
+  useEffect(
+    () => () => {
+      releaseAudioPlayer(playerRef.current);
+    },
+    [],
+  );
 
   useEffect(() => {
     setAudioModeAsync({
@@ -89,6 +108,7 @@ export function usePlayback({
   useEffect(() => {
     if (!currentFile || !status.didJustFinish || handledFinishRef.current) return;
     handledFinishRef.current = true;
+    playingRef.current = false;
     const completedAt = Date.now();
     completedAtRef.current = completedAt;
     void onProgress({
@@ -116,7 +136,8 @@ export function usePlayback({
       }
 
       if (currentFileRef.current?.id === file.id) {
-        player.play();
+        playerRef.current.play();
+        playingRef.current = true;
         return;
       }
 
@@ -130,40 +151,44 @@ export function usePlayback({
       completedAtRef.current = null;
       lastSavedSecondRef.current = Math.floor(resumeAt);
       handledFinishRef.current = false;
-      player.replace({ uri: file.localUri, name: file.name });
-      player.setActiveForLockScreen(
+      const activePlayer = playerRef.current;
+      activePlayer.replace({ uri: file.localUri, name: file.name });
+      activePlayer.setActiveForLockScreen(
         true,
         { title: file.name, artist: 'Playr' },
         { showSeekBackward: true, showSeekForward: true },
       );
 
-      if (resumeAt > 0) await player.seekTo(resumeAt);
+      if (resumeAt > 0) await activePlayer.seekTo(resumeAt);
       if (isReplay && storedProgress) {
         await onProgress({ ...storedProgress, position: 0, completedAt: null, updatedAt: Date.now() });
       }
-      player.play();
+      activePlayer.play();
+      playingRef.current = true;
     },
-    [onError, onProgress, player, progressById, saveCurrent],
+    [onError, onProgress, progressById, saveCurrent],
   );
 
   const toggle = useCallback(() => {
     if (!currentFileRef.current) return;
-    if (statusRef.current.playing) {
-      player.pause();
+    if (playingRef.current) {
+      playerRef.current.pause();
+      playingRef.current = false;
       void saveCurrent();
     } else {
-      player.play();
+      playerRef.current.play();
+      playingRef.current = true;
     }
-  }, [player, saveCurrent]);
+  }, [saveCurrent]);
 
   const seekTo = useCallback(
     async (seconds: number) => {
       const duration = statusRef.current.duration;
       const boundedSeconds = Math.max(0, Math.min(seconds, duration));
-      await player.seekTo(boundedSeconds);
+      await playerRef.current.seekTo(boundedSeconds);
       await saveCurrent(boundedSeconds, duration);
     },
-    [player, saveCurrent],
+    [saveCurrent],
   );
 
   const skip = useCallback(
@@ -173,12 +198,19 @@ export function usePlayback({
 
   const stop = useCallback(async () => {
     await saveCurrent();
-    player.pause();
-    player.clearLockScreenControls();
-    player.replace(null);
+    playingRef.current = false;
     currentFileRef.current = null;
     setCurrentFile(null);
-  }, [player, saveCurrent]);
+
+    const previousPlayer = playerRef.current;
+    const replacementPlayer = createPlaybackPlayer();
+    playerRef.current = replacementPlayer;
+    setPlayer(replacementPlayer);
+    releaseAudioPlayer(previousPlayer);
+
+    // Give File Provider one run-loop turn after AVPlayer deallocation.
+    await wait(50);
+  }, [saveCurrent]);
 
   return {
     currentFile,

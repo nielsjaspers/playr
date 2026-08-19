@@ -12,6 +12,7 @@ export type ICloudAudioFile = {
   downloadProgress: number | null;
   localUri: string | null;
   isUploaded: boolean;
+  metadataAvailable: boolean;
 };
 
 export type ICloudFileOperationResult = {

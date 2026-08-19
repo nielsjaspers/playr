@@ -1,14 +1,4 @@
 import { ActivityIndicator, Pressable, StyleSheet, Text, View } from 'react-native';
-import { Button, Host, Menu } from '@expo/ui/swift-ui';
-import {
-  buttonStyle,
-  disabled,
-  foregroundStyle,
-  labelStyle,
-  menuIndicator,
-  menuOrder,
-  menuStyle,
-} from '@expo/ui/swift-ui/modifiers';
 
 import type { ICloudAudioFile } from '../../modules/playr-icloud';
 import type { PlaybackProgress } from '../storage';
@@ -33,7 +23,8 @@ function formatSize(bytes: number) {
     : `${Math.max(1, Math.round(megabytes))} MB`;
 }
 
-function fileDetail(file: ICloudAudioFile, progress?: PlaybackProgress) {
+function fileDetail(file: ICloudAudioFile, progress?: PlaybackProgress, isRemoving = false) {
+  if (isRemoving) return 'Removing download';
   if (file.downloadState === 'downloading') {
     return file.downloadProgress == null
       ? 'Downloading from iCloud'
@@ -56,13 +47,9 @@ export function EpisodeRow({
   isPlaying,
   isSelecting,
   isSelected,
-  isQueue,
+  isRemoving,
   onPress,
   onToggleSelection,
-  onAddToQueue,
-  onDownload,
-  onRemoveDownload,
-  onRemoveFromQueue,
 }: {
   file: ICloudAudioFile;
   progress?: PlaybackProgress;
@@ -71,13 +58,9 @@ export function EpisodeRow({
   isPlaying: boolean;
   isSelecting: boolean;
   isSelected: boolean;
-  isQueue: boolean;
+  isRemoving: boolean;
   onPress: () => void;
   onToggleSelection: () => void;
-  onAddToQueue: () => void;
-  onDownload: () => void;
-  onRemoveDownload: () => void;
-  onRemoveFromQueue: () => void;
 }) {
   const progressFraction = progress?.duration
     ? Math.min(1, progress.position / progress.duration)
@@ -93,6 +76,7 @@ export function EpisodeRow({
   return (
     <Pressable
       accessibilityRole="button"
+      disabled={isRemoving}
       onPress={isSelecting ? onToggleSelection : onPress}
       style={({ pressed }) => [styles.row, { opacity: pressed ? 0.62 : 1 }]}
     >
@@ -100,23 +84,20 @@ export function EpisodeRow({
         <View style={styles.selectionIcon}>
           <Icon
             name={isSelected ? 'checkmark.circle.fill' : 'circle'}
-            color={isSelected ? palette.accent : palette.tertiaryLabel}
+            color={isSelected ? palette.label : palette.tertiaryLabel}
             size={24}
           />
         </View>
       ) : (
-        <Pressable
-          accessibilityLabel={file.downloadState === 'inCloud' ? 'Download' : 'Play'}
-          hitSlop={8}
-          onPress={onPress}
+        <View
           style={[styles.rowAction, { backgroundColor: palette.fill }]}
         >
-          {file.downloadState === 'downloading' ? (
-            <ActivityIndicator color={palette.accent} size="small" />
+          {file.downloadState === 'downloading' || isRemoving ? (
+            <ActivityIndicator color={palette.label} size="small" />
           ) : (
-            <Icon name={actionName} color={palette.accent} size={19} />
+            <Icon name={actionName} color={palette.label} size={19} />
           )}
-        </Pressable>
+        </View>
       )}
 
       <View style={styles.rowText}>
@@ -124,62 +105,20 @@ export function EpisodeRow({
           {file.name}
         </Text>
         <Text numberOfLines={1} style={[styles.rowDetail, { color: palette.secondaryLabel }]}>
-          {fileDetail(file, progress)}
+          {fileDetail(file, progress, isRemoving)}
         </Text>
         {progressFraction > 0 && progressFraction < 1 ? (
           <View style={[styles.progressTrack, { backgroundColor: palette.fill }]}>
             <View
               style={[
                 styles.progressFill,
-                { backgroundColor: palette.accent, width: `${progressFraction * 100}%` },
+                { backgroundColor: palette.label, width: `${progressFraction * 100}%` },
               ]}
             />
           </View>
         ) : null}
       </View>
 
-      {!isSelecting && isQueue ? (
-        <Pressable
-          accessibilityLabel="Remove from queue"
-          hitSlop={8}
-          onPress={onRemoveFromQueue}
-          style={styles.moreButton}
-        >
-          <Icon name="minus.circle" color={palette.secondaryLabel} size={20} />
-        </Pressable>
-      ) : !isSelecting ? (
-        <Host matchContents ignoreSafeArea="all" style={styles.moreButton}>
-          <Menu
-            label="More actions"
-            systemImage="ellipsis"
-            modifiers={[
-              menuStyle('button'),
-              buttonStyle('plain'),
-              labelStyle('iconOnly'),
-              menuIndicator('hidden'),
-              menuOrder('fixed'),
-              foregroundStyle(palette.secondaryLabel),
-            ]}
-          >
-            <Button label="Add to Queue" systemImage="text.badge.plus" onPress={onAddToQueue} />
-            {file.downloadState === 'downloaded' ? (
-              <Button
-                label="Remove Download"
-                systemImage="trash"
-                role="destructive"
-                onPress={onRemoveDownload}
-              />
-            ) : (
-              <Button
-                label="Download"
-                systemImage="icloud.and.arrow.down"
-                modifiers={[disabled(file.downloadState === 'downloading')]}
-                onPress={onDownload}
-              />
-            )}
-          </Menu>
-        </Host>
-      ) : null}
     </Pressable>
   );
 }
@@ -194,7 +133,7 @@ const styles = StyleSheet.create({
   },
   rowAction: {
     alignItems: 'center',
-    borderRadius: 20,
+    borderRadius: 999,
     height: 40,
     justifyContent: 'center',
     width: 40,
@@ -228,12 +167,5 @@ const styles = StyleSheet.create({
   },
   progressFill: {
     height: '100%',
-  },
-  moreButton: {
-    alignItems: 'center',
-    height: 40,
-    justifyContent: 'center',
-    marginLeft: 6,
-    width: 40,
   },
 });

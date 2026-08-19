@@ -2,9 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
-  FlatList,
   Pressable,
-  RefreshControl,
   SafeAreaView,
   StyleSheet,
   Text,
@@ -12,22 +10,45 @@ import {
   View,
 } from 'react-native';
 import { StatusBar } from 'expo-status-bar';
-import { Button, Host, Menu, RNHostView, TabView } from '@expo/ui/swift-ui';
 import {
+  Button,
+  Host,
+  Image,
+  List,
+  Menu,
+  RNHostView,
+  Spacer,
+  SwipeActions,
+  TabView,
+  VStack,
+} from '@expo/ui/swift-ui';
+import {
+  accessibilityLabel,
   buttonBorderShape,
   buttonStyle,
   controlSize,
   disabled,
+  fixedSize,
   foregroundStyle,
+  frame,
+  geometryGroup,
   labelStyle,
+  listRowBackground,
+  listRowInsets,
+  listRowSeparator,
+  listStyle,
   menuIndicator,
   menuOrder,
+  onDisappear,
+  scrollContentBackground,
   tabViewStyle,
+  tint,
 } from '@expo/ui/swift-ui/modifiers';
 
 import type { ICloudAudioFile } from '../modules/playr-icloud';
 import { EpisodeRow, formatDuration } from './components/EpisodeRow';
 import { PlayerModal } from './components/PlayerModal';
+import { getEpisodePressIntent } from './playbackIntent';
 import { usePlayback } from './usePlayback';
 import { usePlayrLibrary } from './usePlayrLibrary';
 import { createPalette, GlassPanel, Icon, type Palette } from './ui';
@@ -62,6 +83,7 @@ export default function PlayrApp() {
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [isSelecting, setIsSelecting] = useState(false);
   const [isPlayerOpen, setIsPlayerOpen] = useState(false);
+  const [actionMenuGeneration, setActionMenuGeneration] = useState(0);
   const [notice, setNotice] = useState<string | null>(null);
   const [queueCloudPrompt, setQueueCloudPrompt] = useState<ICloudAudioFile | null>(null);
   const filesRef = useRef(library.files);
@@ -97,14 +119,31 @@ export default function PlayrApp() {
   });
   playbackRef.current = playback;
 
+  const presentedError = library.error ?? notice;
+  useEffect(() => {
+    if (!presentedError) return;
+    const isRemovalFailure = presentedError.includes('still downloaded');
+    Alert.alert(
+      isRemovalFailure ? 'Couldn’t Remove Download' : 'Playr Couldn’t Complete That',
+      presentedError,
+      [
+        {
+          text: 'OK',
+          onPress: () => {
+            library.clearError();
+            setNotice(null);
+          },
+        },
+      ],
+    );
+  }, [library.clearError, presentedError]);
+
   const downloadAndMaybePlay = useCallback(
     async (file: ICloudAudioFile, playAfterDownload: boolean) => {
-      setNotice(`Downloading ${file.name} from iCloud…`);
       try {
         const downloadedFiles = await library.download([file.id]);
         const downloadedFile = downloadedFiles.find((item) => item.id === file.id);
         if (!downloadedFile) return;
-        setNotice(null);
         if (playAfterDownload) await playbackRef.current?.play(downloadedFile);
       } catch (caughtError) {
         setNotice(caughtError instanceof Error ? caughtError.message : 'The download failed.');
@@ -174,7 +213,7 @@ export default function PlayrApp() {
           ],
         );
       } else {
-        setNotice(`${file.name} was added to the queue.`);
+        return;
       }
     },
     [downloadAndMaybePlay, library.addToQueue],
@@ -237,7 +276,21 @@ export default function PlayrApp() {
     finishSelecting();
   }, [finishSelecting, library.files, removeFileDownloads, selectedIds]);
 
-  const banner = library.error ?? notice;
+  const resetActionMenu = useCallback(() => {
+    setActionMenuGeneration((generation) => generation + 1);
+  }, []);
+
+  const pressEpisode = useCallback(
+    (file: ICloudAudioFile) => {
+      const intent = getEpisodePressIntent(file.id, playback.currentFile?.id ?? null);
+      if (intent === 'toggle') {
+        playback.toggle();
+        return;
+      }
+      void openFile(file);
+    },
+    [openFile, playback.currentFile?.id, playback.toggle],
+  );
 
   const renderScreen = (targetScreen: Screen) => {
     const visibleFiles = targetScreen === 'library'
@@ -248,151 +301,185 @@ export default function PlayrApp() {
 
     return (
       <SafeAreaView style={[styles.safeArea, { backgroundColor: palette.background }]}>
-        <FlatList
-          contentContainerStyle={[
-            styles.listContent,
-            { paddingBottom: playback.currentFile ? 116 : 30 },
-          ]}
-          data={visibleFiles}
-          keyExtractor={(file) => file.id}
-          ListHeaderComponent={
-            <View>
-              <View style={styles.headerRow}>
-                <View style={styles.titleRow}>
-                  <Text style={[styles.largeTitle, { color: palette.label }]}>
-                    {targetScreen === 'library' ? 'Audio' : 'Queue'}
-                  </Text>
-                  {library.isRefreshing ? (
-                    <ActivityIndicator color={palette.secondaryLabel} />
-                  ) : null}
-                </View>
+        <View style={styles.headerRow}>
+          <View style={styles.titleRow}>
+            <Text style={[styles.largeTitle, { color: palette.label }]}>
+              {targetScreen === 'library' ? 'Audio' : 'Queue'}
+            </Text>
+            {library.isRefreshing ? (
+              <ActivityIndicator color={palette.secondaryLabel} />
+            ) : null}
+          </View>
 
-                {targetScreen === 'library' ? (
-                  <Host
-                    colorScheme={isDark ? 'dark' : 'light'}
-                    ignoreSafeArea="all"
-                    matchContents
-                    seedColor={palette.label}
-                    style={styles.nativeActionHost}
-                  >
-                    {isSelecting ? (
-                      <Button
-                        label="Done selecting"
-                        systemImage="checkmark"
-                        onPress={finishSelecting}
-                        modifiers={[
-                          buttonStyle('glass'),
-                          buttonBorderShape('circle'),
-                          controlSize('large'),
-                          labelStyle('iconOnly'),
-                          foregroundStyle(palette.label),
-                        ]}
-                      />
-                    ) : (
-                      <Menu
-                        label="Library actions"
-                        systemImage="ellipsis"
-                        modifiers={[
-                          buttonStyle('glass'),
-                          buttonBorderShape('circle'),
-                          controlSize('large'),
-                          labelStyle('iconOnly'),
-                          menuIndicator('hidden'),
-                          menuOrder('fixed'),
-                          foregroundStyle(palette.label),
-                        ]}
-                      >
-                        <Button
-                          label="Select Files"
-                          systemImage="checkmark.circle"
-                          onPress={() => setIsSelecting(true)}
-                        />
-                        <Button
-                          label="Remove All Downloads"
-                          systemImage="trash"
-                          role="destructive"
-                          modifiers={[disabled(downloadedIds.length === 0)]}
-                          onPress={confirmRemoveAllDownloads}
-                        />
-                        <Button
-                          label="Refresh"
-                          systemImage="arrow.clockwise"
-                          onPress={() => void library.refresh()}
-                        />
-                      </Menu>
-                    )}
-                  </Host>
-                ) : library.queueIds.length > 0 ? (
-                  <Pressable onPress={() => void library.clearQueue()}>
-                    <Text style={[styles.clearButton, { color: palette.destructive }]}>Clear</Text>
-                  </Pressable>
-                ) : null}
-              </View>
-
-              {banner ? (
-                <Pressable
-                  onPress={() => {
-                    library.clearError();
-                    setNotice(null);
-                  }}
-                  style={[styles.banner, { backgroundColor: palette.fill }]}
+          {targetScreen === 'library' ? (
+            <Host
+              colorScheme={isDark ? 'dark' : 'light'}
+              seedColor={palette.label}
+              style={styles.nativeActionHost}
+            >
+              {isSelecting ? (
+                <Button
+                  label="Done selecting"
+                  systemImage="checkmark"
+                  onPress={finishSelecting}
+                  modifiers={[
+                    frame({ width: 44, height: 44 }),
+                    buttonStyle('glass'),
+                    buttonBorderShape('circle'),
+                    controlSize('large'),
+                    labelStyle('iconOnly'),
+                    foregroundStyle(palette.label),
+                  ]}
+                />
+              ) : (
+                <Menu
+                  key={actionMenuGeneration}
+                  label={<Image color={palette.label} size={17} systemName="ellipsis" />}
+                  modifiers={[
+                    buttonStyle('glass'),
+                    buttonBorderShape('circle'),
+                    controlSize('large'),
+                    menuIndicator('hidden'),
+                    menuOrder('fixed'),
+                    fixedSize({ horizontal: true, vertical: true }),
+                    frame({ width: 44, height: 44 }),
+                    geometryGroup(),
+                    foregroundStyle(palette.label),
+                    accessibilityLabel('Library actions'),
+                  ]}
                 >
-                  <Text style={[styles.bannerText, { color: palette.secondaryLabel }]}>{banner}</Text>
-                  <Icon name="xmark" color={palette.secondaryLabel} size={12} />
-                </Pressable>
-              ) : null}
+                  <Button
+                    label="Select Files"
+                    systemImage="checkmark.circle"
+                    onPress={() => setIsSelecting(true)}
+                    modifiers={[onDisappear(resetActionMenu)]}
+                  />
+                  <Button
+                    label="Remove All Downloads"
+                    systemImage="trash"
+                    role="destructive"
+                    onPress={confirmRemoveAllDownloads}
+                    modifiers={[
+                      disabled(downloadedIds.length === 0 || library.removingIds.size > 0),
+                    ]}
+                  />
+                  <Button
+                    label="Refresh"
+                    systemImage="arrow.clockwise"
+                    onPress={() => void library.refresh()}
+                  />
+                </Menu>
+              )}
+            </Host>
+          ) : library.queueIds.length > 0 ? (
+            <Pressable onPress={() => void library.clearQueue()}>
+              <Text style={[styles.clearButton, { color: palette.destructive }]}>Clear</Text>
+            </Pressable>
+          ) : null}
+        </View>
 
-              {library.availability !== 'available' ? (
-                <View style={styles.icloudUnavailable}>
-                  <Icon name="icloud.slash" color={palette.secondaryLabel} size={30} />
-                  <Text style={[styles.emptyTitle, { color: palette.label }]}>
-                    iCloud Drive is unavailable
-                  </Text>
-                  <Text style={[styles.emptyBody, { color: palette.secondaryLabel }]}>
-                    Sign in to iCloud Drive in Settings, then reopen Playr.
-                  </Text>
-                </View>
-              ) : null}
-            </View>
-          }
-          ListEmptyComponent={
-            library.isLoading ? (
-              <ActivityIndicator color={palette.accent} style={styles.loading} />
-            ) : library.availability === 'available' ? (
-              <EmptyState palette={palette} screen={targetScreen} />
-            ) : null
-          }
-          refreshControl={
-            <RefreshControl
-              onRefresh={library.refresh}
-              refreshing={library.isRefreshing}
-              tintColor={palette.secondaryLabel}
-            />
-          }
-          renderItem={({ item }) => (
-            <View style={{ backgroundColor: palette.surface }}>
-              <EpisodeRow
-                file={item}
-                isCurrent={playback.currentFile?.id === item.id}
-                isPlaying={playback.status.playing}
-                isQueue={targetScreen === 'queue'}
-                isSelected={selectedIds.has(item.id)}
-                isSelecting={isSelecting && targetScreen === 'library'}
-                onAddToQueue={() => void addFileToQueue(item)}
-                onDownload={() => void downloadAndMaybePlay(item, false)}
-                onPress={() => void openFile(item)}
-                onRemoveDownload={() => void removeFileDownloads([item.id])}
-                onRemoveFromQueue={() => void library.removeFromQueue(item.id)}
-                onToggleSelection={() => toggleSelection(item.id)}
-                palette={palette}
-                progress={library.progressById.get(item.id)}
+        {library.availability !== 'available' ? (
+          <View style={styles.icloudUnavailable}>
+            <Icon name="icloud.slash" color={palette.secondaryLabel} size={30} />
+            <Text style={[styles.emptyTitle, { color: palette.label }]}>
+              iCloud Drive is unavailable
+            </Text>
+            <Text style={[styles.emptyBody, { color: palette.secondaryLabel }]}>
+              Sign in to iCloud Drive in Settings, then reopen Playr.
+            </Text>
+          </View>
+        ) : library.isLoading ? (
+          <ActivityIndicator color={palette.secondaryLabel} style={styles.loading} />
+        ) : visibleFiles.length === 0 ? (
+          <EmptyState palette={palette} screen={targetScreen} />
+        ) : (
+          <Host
+            colorScheme={isDark ? 'dark' : 'light'}
+            seedColor={palette.label}
+            style={[styles.episodeListHost, { backgroundColor: palette.background }]}
+          >
+            <List modifiers={[listStyle('plain'), scrollContentBackground('hidden')]}>
+              {visibleFiles.map((item) => {
+                const row = (
+                  <VStack modifiers={[frame({ minHeight: 72 })]}>
+                    <RNHostView>
+                      <EpisodeRow
+                        file={item}
+                        isCurrent={playback.currentFile?.id === item.id}
+                        isPlaying={playback.status.playing}
+                        isRemoving={library.removingIds.has(item.id)}
+                        isSelected={selectedIds.has(item.id)}
+                        isSelecting={isSelecting && targetScreen === 'library'}
+                        onPress={() => pressEpisode(item)}
+                        onToggleSelection={() => toggleSelection(item.id)}
+                        palette={palette}
+                        progress={library.progressById.get(item.id)}
+                      />
+                    </RNHostView>
+                  </VStack>
+                );
+                const rowModifiers = [
+                  listRowBackground(palette.background),
+                  listRowInsets({ top: 0, leading: 16, bottom: 0, trailing: 16 }),
+                ];
+
+                if (isSelecting && targetScreen === 'library') {
+                  return (
+                    <VStack key={item.id} modifiers={rowModifiers}>
+                      {row}
+                    </VStack>
+                  );
+                }
+
+                return (
+                  <SwipeActions key={item.id} modifiers={rowModifiers}>
+                    {row}
+                    {targetScreen === 'library' ? (
+                      <SwipeActions.Actions edge="leading" allowsFullSwipe={false}>
+                        <Button
+                          label="Enqueue"
+                          systemImage="text.badge.plus"
+                          modifiers={[tint(palette.label)]}
+                          onPress={() => void addFileToQueue(item)}
+                        />
+                      </SwipeActions.Actions>
+                    ) : null}
+                    <SwipeActions.Actions edge="trailing">
+                        <Button
+                          label="Remove"
+                          systemImage="trash"
+                          role={targetScreen === 'queue' ? 'destructive' : undefined}
+                          modifiers={
+                            targetScreen === 'library'
+                              ? [
+                                  tint(palette.destructive),
+                                  disabled(
+                                    item.downloadState !== 'downloaded' ||
+                                      library.removingIds.has(item.id),
+                                  ),
+                                ]
+                              : undefined
+                          }
+                          onPress={
+                            targetScreen === 'queue'
+                              ? () => void library.removeFromQueue(item.id)
+                              : () => void removeFileDownloads([item.id])
+                          }
+                        />
+                    </SwipeActions.Actions>
+                  </SwipeActions>
+                );
+              })}
+              <Spacer
+                modifiers={[
+                  frame({ height: playback.currentFile ? 104 : 20 }),
+                  listRowBackground(palette.background),
+                  listRowSeparator('hidden'),
+                ]}
               />
-            </View>
-          )}
-          ItemSeparatorComponent={() => (
-            <View style={[styles.separator, { backgroundColor: palette.separator }]} />
-          )}
-        />
+            </List>
+          </Host>
+        )}
 
         {targetScreen === 'library' && isSelecting && selectedIds.size > 0 ? (
           <GlassPanel
@@ -401,8 +488,8 @@ export default function PlayrApp() {
             style={[styles.selectionBar, { bottom: playback.currentFile ? 102 : 18 }]}
           >
             <Pressable onPress={() => void downloadSelected()} style={styles.batchAction}>
-              <Icon name="icloud.and.arrow.down" color={palette.accent} size={20} />
-              <Text style={[styles.batchText, { color: palette.accent }]}>Download</Text>
+              <Icon name="icloud.and.arrow.down" color={palette.label} size={20} />
+              <Text style={[styles.batchText, { color: palette.label }]}>Download</Text>
             </Pressable>
             <View style={[styles.verticalSeparator, { backgroundColor: palette.separator }]} />
             <Pressable onPress={() => void removeSelected()} style={styles.batchAction}>
@@ -413,28 +500,33 @@ export default function PlayrApp() {
         ) : null}
 
         {playback.currentFile ? (
-          <Pressable onPress={() => setIsPlayerOpen(true)} style={styles.miniPlayerPosition}>
-            <GlassPanel interactive palette={palette} style={styles.miniPlayer}>
-              <View style={[styles.miniArtwork, { backgroundColor: palette.fill }]}>
-                <Icon name="waveform" color={palette.accent} size={22} />
-              </View>
-              <View style={styles.miniText}>
-                <Text numberOfLines={1} style={[styles.miniTitle, { color: palette.label }]}>
-                  {playback.currentFile.name}
-                </Text>
-                <Text style={[styles.miniDetail, { color: palette.secondaryLabel }]}>
-                  {formatDuration(playback.status.currentTime)} ·{' '}
-                  {playback.status.playing ? 'Playing' : 'Paused'}
-                </Text>
-              </View>
+          <View style={styles.miniPlayerPosition}>
+            <GlassPanel palette={palette} style={styles.miniPlayer}>
+              <Pressable
+                accessibilityLabel="Open now playing"
+                accessibilityRole="button"
+                onPress={() => setIsPlayerOpen(true)}
+                style={({ pressed }) => [styles.miniOpenArea, { opacity: pressed ? 0.68 : 1 }]}
+              >
+                <View style={[styles.miniArtwork, { backgroundColor: palette.fill }]}>
+                  <Icon name="waveform" color={palette.accent} size={22} />
+                </View>
+                <View style={styles.miniText}>
+                  <Text numberOfLines={1} style={[styles.miniTitle, { color: palette.label }]}>
+                    {playback.currentFile.name}
+                  </Text>
+                  <Text style={[styles.miniDetail, { color: palette.secondaryLabel }]}>
+                    {formatDuration(playback.status.currentTime)} ·{' '}
+                    {playback.status.playing ? 'Playing' : 'Paused'}
+                  </Text>
+                </View>
+              </Pressable>
               <Pressable
                 accessibilityLabel={playback.status.playing ? 'Pause' : 'Play'}
-                hitSlop={10}
-                onPress={(event) => {
-                  event.stopPropagation();
-                  playback.toggle();
-                }}
-                style={styles.miniControl}
+                accessibilityRole="button"
+                hitSlop={8}
+                onPress={playback.toggle}
+                style={({ pressed }) => [styles.miniControl, { opacity: pressed ? 0.55 : 1 }]}
               >
                 <Icon
                   name={playback.status.playing ? 'pause.fill' : 'play.fill'}
@@ -443,7 +535,7 @@ export default function PlayrApp() {
                 />
               </Pressable>
             </GlassPanel>
-          </Pressable>
+          </View>
         ) : null}
       </SafeAreaView>
     );
@@ -490,30 +582,20 @@ const styles = StyleSheet.create({
   root: { flex: 1 },
   tabHost: { flex: 1 },
   safeArea: { flex: 1 },
-  listContent: { paddingHorizontal: 16 },
   headerRow: {
     alignItems: 'center',
     flexDirection: 'row',
     justifyContent: 'space-between',
-    paddingBottom: 18,
+    paddingBottom: 12,
+    paddingHorizontal: 16,
     paddingTop: 12,
+    zIndex: 10,
   },
   titleRow: { alignItems: 'center', flexDirection: 'row', gap: 10 },
   largeTitle: { fontSize: 34, fontWeight: '700', letterSpacing: 0.2 },
-  nativeActionHost: { minHeight: 44, minWidth: 44 },
-  banner: {
-    alignItems: 'center',
-    borderRadius: 12,
-    flexDirection: 'row',
-    gap: 8,
-    justifyContent: 'space-between',
-    marginTop: 14,
-    paddingHorizontal: 12,
-    paddingVertical: 10,
-  },
-  bannerText: { flex: 1, fontSize: 13, lineHeight: 18 },
+  nativeActionHost: { height: 44, width: 44 },
+  episodeListHost: { flex: 1 },
   clearButton: { fontSize: 15, fontWeight: '500' },
-  separator: { height: StyleSheet.hairlineWidth, marginLeft: 64 },
   loading: { marginTop: 56 },
   emptyState: { alignItems: 'center', paddingHorizontal: 34, paddingTop: 56 },
   icloudUnavailable: { alignItems: 'center', paddingHorizontal: 28, paddingTop: 46 },
@@ -522,17 +604,25 @@ const styles = StyleSheet.create({
   miniPlayerPosition: { bottom: 12, left: 12, position: 'absolute', right: 12 },
   miniPlayer: {
     alignItems: 'center',
-    borderRadius: 22,
+    borderCurve: 'continuous',
+    borderRadius: 30,
     flexDirection: 'row',
-    height: 78,
+    height: 72,
     paddingHorizontal: 10,
+  },
+  miniOpenArea: {
+    alignItems: 'center',
+    flex: 1,
+    flexDirection: 'row',
+    minWidth: 0,
   },
   miniArtwork: {
     alignItems: 'center',
-    borderRadius: 14,
-    height: 56,
+    borderCurve: 'continuous',
+    borderRadius: 16,
+    height: 52,
     justifyContent: 'center',
-    width: 56,
+    width: 52,
   },
   miniText: { flex: 1, marginLeft: 11 },
   miniTitle: { fontSize: 15, fontWeight: '600' },
