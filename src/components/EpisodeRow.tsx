@@ -1,4 +1,14 @@
 import { ActivityIndicator, Pressable, StyleSheet, Text, View } from 'react-native';
+import { Button, Host, Menu } from '@expo/ui/swift-ui';
+import {
+  buttonStyle,
+  disabled,
+  foregroundStyle,
+  labelStyle,
+  menuIndicator,
+  menuOrder,
+  menuStyle,
+} from '@expo/ui/swift-ui/modifiers';
 
 import type { ICloudAudioFile } from '../../modules/playr-icloud';
 import type { PlaybackProgress } from '../storage';
@@ -49,7 +59,9 @@ export function EpisodeRow({
   isQueue,
   onPress,
   onToggleSelection,
-  onMore,
+  onAddToQueue,
+  onDownload,
+  onRemoveDownload,
   onRemoveFromQueue,
 }: {
   file: ICloudAudioFile;
@@ -62,7 +74,9 @@ export function EpisodeRow({
   isQueue: boolean;
   onPress: () => void;
   onToggleSelection: () => void;
-  onMore: () => void;
+  onAddToQueue: () => void;
+  onDownload: () => void;
+  onRemoveDownload: () => void;
   onRemoveFromQueue: () => void;
 }) {
   const progressFraction = progress?.duration
@@ -124,19 +138,47 @@ export function EpisodeRow({
         ) : null}
       </View>
 
-      {!isSelecting ? (
+      {!isSelecting && isQueue ? (
         <Pressable
-          accessibilityLabel={isQueue ? 'Remove from queue' : 'More actions'}
+          accessibilityLabel="Remove from queue"
           hitSlop={8}
-          onPress={isQueue ? onRemoveFromQueue : onMore}
+          onPress={onRemoveFromQueue}
           style={styles.moreButton}
         >
-          <Icon
-            name={isQueue ? 'minus.circle' : 'ellipsis'}
-            color={palette.secondaryLabel}
-            size={20}
-          />
+          <Icon name="minus.circle" color={palette.secondaryLabel} size={20} />
         </Pressable>
+      ) : !isSelecting ? (
+        <Host matchContents ignoreSafeArea="all" style={styles.moreButton}>
+          <Menu
+            label="More actions"
+            systemImage="ellipsis"
+            modifiers={[
+              menuStyle('button'),
+              buttonStyle('plain'),
+              labelStyle('iconOnly'),
+              menuIndicator('hidden'),
+              menuOrder('fixed'),
+              foregroundStyle(palette.secondaryLabel),
+            ]}
+          >
+            <Button label="Add to Queue" systemImage="text.badge.plus" onPress={onAddToQueue} />
+            {file.downloadState === 'downloaded' ? (
+              <Button
+                label="Remove Download"
+                systemImage="trash"
+                role="destructive"
+                onPress={onRemoveDownload}
+              />
+            ) : (
+              <Button
+                label="Download"
+                systemImage="icloud.and.arrow.down"
+                modifiers={[disabled(file.downloadState === 'downloading')]}
+                onPress={onDownload}
+              />
+            )}
+          </Menu>
+        </Host>
       ) : null}
     </Pressable>
   );
@@ -192,6 +234,6 @@ const styles = StyleSheet.create({
     height: 40,
     justifyContent: 'center',
     marginLeft: 6,
-    width: 34,
+    width: 40,
   },
 });
