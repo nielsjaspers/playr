@@ -170,7 +170,7 @@ export function usePlaybackFlow(library: Library, playback: Playback, onError: (
 
   const stop = useCallback(async () => {
     cancelPending();
-    await playbackRef.current.stop();
+    if (!await playbackRef.current.stop()) throw new Error('The player could not release this file. Try stopping playback again.');
   }, [cancelPending]);
 
   const toggleShuffle = useCallback(() => {

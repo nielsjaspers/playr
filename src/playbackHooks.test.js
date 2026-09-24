@@ -1,4 +1,4 @@
-import { afterEach, expect, mock, test } from 'bun:test';
+import { afterEach, expect, mock, spyOn, test } from 'bun:test';
 import React from 'react';
 import { act, create } from 'react-test-renderer';
 
@@ -34,7 +34,7 @@ const file = (id, downloadState = 'downloaded') => ({
 });
 const deferred = () => Promise.withResolvers();
 let root;
-afterEach(async () => { if (root) await act(() => root.unmount()); root = null; alerts.length = 0; });
+afterEach(async () => { if (root) await act(() => root.unmount()); root = null; alerts.length = 0; Object.assign(audioStatus, { currentTime: 0, playing: false }); });
 
 async function mount(overrides = {}) {
   const files = [file('A'), file('B'), file('C'), file('X')];
@@ -58,7 +58,7 @@ async function mount(overrides = {}) {
     return null;
   }
   await act(() => { root = create(React.createElement(Harness)); });
-  return { get: () => result, library, errors, setQueue(ids) { queue = ids; library.queueIds = ids; } };
+  return { get: () => result, library, errors, render: () => act(() => root.update(React.createElement(Harness))), setQueue(ids) { queue = ids; library.queueIds = ids; } };
 }
 
 test('an old download cannot replace a newer library selection', async () => {
@@ -114,4 +114,53 @@ test('a newer selection cancels a start waiting on persistence', async () => {
   await act(async () => { saving.resolve(); await Promise.all([b, c]); });
   expect(app.get().playback.currentFile.id).toBe('C');
   expect(players.at(-1).played).toEqual(['file://A', 'file://C']);
+});
+
+test('a replacement canceled during native seeking never starts or overwrites the next source', async () => {
+  const seeking = deferred();
+  const app = await mount({ progressById: new Map([['B', { fileId: 'B', position: 42, duration: 100, completedAt: null, updatedAt: 1 }]]) });
+  await act(async () => { await app.get().playback.play(file('A')); });
+  players.at(-1).seekTo = () => seeking.promise;
+  let b, c;
+  await act(async () => { b = app.get().playback.play(file('B')); });
+  await act(async () => { c = app.get().playback.play(file('C')); });
+  await act(async () => { seeking.resolve(); await Promise.all([b, c]); });
+  expect(app.get().playback.currentFile.id).toBe('C');
+  expect(players.at(-1).played).toEqual(['file://A', 'file://C']);
+});
+
+test('periodic progress saves resume five seconds after a backward seek', async () => {
+  let now = 0;
+  const clock = spyOn(performance, 'now').mockImplementation(() => now);
+  const saves = [];
+  try {
+    const app = await mount({ updateProgress: async (progress) => saves.push(progress) });
+    await act(async () => { await app.get().playback.play(file('A')); });
+    Object.assign(audioStatus, { currentTime: 600, duration: 900, playing: true });
+    now = 5000;
+    await app.render();
+    await act(async () => { await app.get().playback.seekTo(60); });
+    expect(saves.at(-1).position).toBe(60);
+    // A lock-screen seek also arrives as a status update, without calling seekTo.
+    audioStatus.currentTime = 30;
+    now = 10000;
+    await app.render();
+    expect(saves.at(-1).position).toBe(30);
+    audioStatus.currentTime = 35;
+    now = 15000;
+    await app.render();
+    expect(saves.at(-1).position).toBe(35);
+  } finally { clock.mockRestore(); audioStatus.duration = 100; }
+});
+
+test('a failure to release the player stops callers from evicting its file', async () => {
+  const app = await mount();
+  await act(async () => { await app.get().playback.play(file('A')); });
+  const player = players.at(-1);
+  const pause = player.pause;
+  player.pause = () => { throw new Error('Native player is busy'); };
+  try {
+    await act(async () => { await expect(app.get().flow.stop()).rejects.toThrow('could not release'); });
+    expect(app.errors).toContain('Native player is busy');
+  } finally { player.pause = pause; }
 });

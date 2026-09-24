@@ -8,7 +8,6 @@ import {
   StyleSheet,
   Text,
   useColorScheme,
-  useWindowDimensions,
   View,
 } from 'react-native';
 import { StatusBar } from 'expo-status-bar';
@@ -35,7 +34,7 @@ import {
 import { usePlaybackFlow } from './usePlaybackFlow';
 import { usePlayback } from './usePlayback';
 import { usePlayrLibrary } from './usePlayrLibrary';
-import { createPalette, GlassPanel, Icon, type Palette } from './ui';
+import { createPalette, GlassPanel, Icon } from './ui';
 
 type Screen = 'library' | 'queue';
 
@@ -48,7 +47,6 @@ function formatPresentedError(message: string) {
 
 export default function PlayrApp() {
   const isDark = useColorScheme() === 'dark';
-  const viewport = useWindowDimensions();
   const palette = useMemo(() => createPalette(isDark), [isDark]);
   const library = usePlayrLibrary();
   const [screen, setScreen] = useState<Screen>('library');

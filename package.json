@@ -22,7 +22,10 @@
   "scripts": {
     "start": "expo start",
     "ios": "expo run:ios",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "bun test",
+    "test:native": "sh scripts/test-native.sh"
   },
-  "private": true
+  "private": true,
+  "packageManager": "bun@1.4.2"
 }

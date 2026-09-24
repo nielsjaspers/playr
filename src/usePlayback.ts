@@ -347,21 +347,23 @@ export function usePlayback({
 
   const stop = useCallback(async () => {
     ++sourceVersion.current;
-    await runCommand(async () => {
+    return Boolean(await runCommand(async () => {
       await saveCurrent();
+      const previousPlayer = playerRef.current;
+      previousPlayer.pause();
+      const replacementPlayer = createPlaybackPlayer();
+      playerRef.current = replacementPlayer;
+      setPlayer(replacementPlayer);
       playingRef.current = false;
       currentFileRef.current = null;
       lastStartedFileIdRef.current = null;
       finishGateRef.current = null;
       setCurrentFile(null);
-      const previousPlayer = playerRef.current;
-      const replacementPlayer = createPlaybackPlayer();
-      playerRef.current = replacementPlayer;
-      setPlayer(replacementPlayer);
       releaseAudioPlayer(previousPlayer);
       // Give File Provider one run-loop turn after AVPlayer deallocation.
       await wait(50);
-    });
+      return true;
+    }));
   }, [runCommand, saveCurrent]);
 
   return {
