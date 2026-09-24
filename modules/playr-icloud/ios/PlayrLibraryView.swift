@@ -321,6 +321,9 @@ private struct PlayrEpisodeRow: View {
     }
     .frame(minHeight: 62)
     .contentShape(Rectangle())
+    .accessibilityElement(children: .ignore)
+    .accessibilityLabel(item.name)
+    .accessibilityValue(detail)
   }
 
   private var actionSymbol: String {
@@ -807,70 +810,55 @@ public struct PlayrQueueView: ExpoSwiftUI.View, ExpoSwiftUI.WithHostingView {
 
   public var body: some View {
     NavigationStack {
-      List {
-        if props.files.isEmpty && props.continuationFiles.isEmpty {
-          VStack(spacing: 10) {
-            Text("Nothing up next").font(.headline)
-            Text("Play from your library or add episodes to the queue.").foregroundStyle(.secondary)
-          }.padding(.vertical, 36).frame(maxWidth: .infinity)
+      queueList
+        .listStyle(.plain)
+        .scrollContentBackground(.hidden)
+        .background(Color(uiColor: .systemBackground))
+        .safeAreaInset(edge: .bottom) {
+          if props.currentFileId != nil { Color.clear.frame(height: 90) }
         }
-        if !props.files.isEmpty {
-          Section("Next in Queue") { rows(props.files, queued: true) }
+        .navigationTitle("Queue")
+        .navigationBarTitleDisplayMode(.large)
+        .toolbar {
+          ToolbarItem(placement: .topBarTrailing) {
+            Menu {
+              if !props.files.isEmpty {
+                Button("Clear Queue", systemImage: "trash", role: .destructive) { props.onClear() }
+              }
+              EditButton()
+            } label: { Image(systemName: "ellipsis") }
+            .accessibilityLabel("Queue actions")
+          }
         }
-        if !props.continuationFiles.isEmpty {
-          Section("Next from Library") { rows(props.continuationFiles, queued: false) }
-        }
-      }
-      .listStyle(.plain)
-      .scrollContentBackground(.hidden)
-      .background(Color(uiColor: .systemBackground))
-      .safeAreaInset(edge: .bottom) {
-        if props.currentFileId != nil { Color.clear.frame(height: 90) }
-      }
-      .navigationTitle("Queue")
-      .navigationBarTitleDisplayMode(.large)
-      .toolbar {
-        ToolbarItem(placement: .topBarTrailing) {
-          Menu {
-            if !props.files.isEmpty {
-              Button("Clear Queue", systemImage: "trash", role: .destructive) { props.onClear() }
-            }
-            if #unavailable(iOS 27.0) { EditButton() }
-          } label: { Image(systemName: "ellipsis") }
-          .accessibilityLabel("Queue actions")
-        }
-      }
-      .environment(\.editMode, $editMode)
-      .tint(.primary)
+        .environment(\.editMode, $editMode)
+        .tint(.primary)
     }
   }
 
-  @ViewBuilder
-  private func rows(_ items: [PlayrLibraryAudioItemRecord], queued: Bool) -> some View {
-    if #available(iOS 27.0, *) {
-      ForEach(items, id: \.id) { item in queueRow(item, queued: queued) }
-        .reorderable()
-        .reorderContainer(for: PlayrLibraryAudioItemRecord.self, itemID: \.id) { difference in
-          var ids = items.map(\.id)
-          let sourceSet = Set(difference.sources)
-          let moving = ids.filter(sourceSet.contains)
-          ids.removeAll(where: sourceSet.contains)
-          switch difference.destination.position {
-          case .before(let destination):
-            ids.insert(contentsOf: moving, at: ids.firstIndex(of: destination) ?? ids.endIndex)
-          case .end:
-            ids.append(contentsOf: moving)
-          }
-          sendOrder(ids, queued: queued)
-        }
-    } else {
-      ForEach(items, id: \.id) { item in queueRow(item, queued: queued) }
-        .onMove { offsets, destination in
-          var ids = items.map(\.id)
-          ids.move(fromOffsets: offsets, toOffset: destination)
-          sendOrder(ids, queued: queued)
-        }
+  private var queueList: some View {
+    List {
+      if props.files.isEmpty && props.continuationFiles.isEmpty {
+        VStack(spacing: 10) {
+          Text("Nothing up next").font(.headline)
+          Text("Play from your library or add episodes to the queue.").foregroundStyle(.secondary)
+        }.padding(.vertical, 36).frame(maxWidth: .infinity)
+      }
+      if !props.files.isEmpty {
+        Section("Next in Queue") { rows(props.files, queued: true) }
+      }
+      if !props.continuationFiles.isEmpty {
+        Section("Next from Library") { rows(props.continuationFiles, queued: false) }
+      }
     }
+  }
+
+  private func rows(_ items: [PlayrLibraryAudioItemRecord], queued: Bool) -> some View {
+    ForEach(items, id: \.id) { item in queueRow(item, queued: queued) }
+      .onMove { offsets, destination in
+        var ids = items.map(\.id)
+        ids.move(fromOffsets: offsets, toOffset: destination)
+        sendOrder(ids, queued: queued)
+      }
   }
 
   private func sendOrder(_ ids: [String], queued: Bool) {
@@ -882,6 +870,7 @@ public struct PlayrQueueView: ExpoSwiftUI.View, ExpoSwiftUI.WithHostingView {
     PlayrEpisodeRow(item: item, isCurrent: false, isPlaying: false, isRemoving: false)
       .contentShape(Rectangle())
       .onTapGesture {
+        guard editMode == .inactive else { return }
         if queued { props.onOpenFile(["id": item.id]) }
         else { props.onOpenContinuation(["id": item.id]) }
       }

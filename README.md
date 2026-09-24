@@ -36,7 +36,7 @@ The native iCloud module requires a native build. Expo Go cannot load it. Real i
 - Next consumes the explicit queue first, then advances through the library order. Previous ignores consumed queue entries. From a queued episode it returns to the last library position; otherwise it goes backward through the library order.
 - Repeat-all wraps the library order. It does not restore consumed queue entries. Repeat-one replays the current episode on completion without consuming another entry. Manual Next still advances.
 - Shuffle affects the library order, not explicit queued episodes.
-- The Queue tab shows explicit entries and the library continuation. Reordering either section updates playback. Clear Queue clears explicit pending entries, without stopping the current episode or removing the library continuation.
+- The Queue tab shows explicit entries and the library continuation. Choose Edit from Queue actions to reorder either section with its move handles, then choose Done. Reordering updates playback. Clear Queue clears explicit pending entries, without stopping the current episode or removing the library continuation.
 - Cancel stops a pending playback request. An iCloud transfer already requested can continue. Prefetch never starts playback by itself.
 
 ## Verification

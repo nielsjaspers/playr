@@ -512,10 +512,10 @@ export default function PlayrApp() {
           }}
           modifiers={[tabViewStyle({ type: 'automatic' }), labelStyle('iconOnly')]}
         >
-          <TabView.Tab value="library" systemImage="music.note.list">
+          <TabView.Tab value="library" label="Library" systemImage="music.note.list">
             <RNHostView>{renderLibraryScreen()}</RNHostView>
           </TabView.Tab>
-          <TabView.Tab value="queue" systemImage="text.badge.plus">
+          <TabView.Tab value="queue" label="Queue" systemImage="text.badge.plus">
             <RNHostView>{renderQueueScreen()}</RNHostView>
           </TabView.Tab>
         </TabView>
