@@ -786,10 +786,13 @@ public final class PlayrQueueViewProps: ExpoSwiftUI.ViewProps {
   @Field var currentFileId: String?
   @Field var isPlaying: Bool = false
   @Field var files: [PlayrLibraryAudioItemRecord] = []
+  @Field var continuationFiles: [PlayrLibraryAudioItemRecord] = []
 
   var onOpenFile = EventDispatcher()
+  var onOpenContinuation = EventDispatcher()
   var onRemoveFromQueue = EventDispatcher()
   var onReorder = EventDispatcher()
+  var onReorderContinuation = EventDispatcher()
   var onClear = EventDispatcher()
 }
 
@@ -797,150 +800,100 @@ public struct PlayrQueueView: ExpoSwiftUI.View, ExpoSwiftUI.WithHostingView {
   @ObservedObject public var props: PlayrQueueViewProps
   @State private var editMode: EditMode = .inactive
 
-  public init(props: PlayrQueueViewProps) {
-    self.props = props
-  }
+  public init(props: PlayrQueueViewProps) { self.props = props }
 
   public var body: some View {
     NavigationStack {
-      queueContent
-        .navigationTitle("Queue")
-        .navigationBarTitleDisplayMode(.large)
-        .toolbar { queueToolbar }
-        .environment(\.editMode, $editMode)
-        .tint(.primary)
-    }
-  }
-
-  private var queueContent: AnyView {
-    if props.files.isEmpty {
-      return AnyView(emptyQueueView)
-    }
-
-    if #available(iOS 27.0, *) {
-      return AnyView(reorderableQueue)
-    }
-
-    return AnyView(legacyQueue)
-  }
-
-  private var emptyQueueView: some View {
-    VStack(spacing: 10) {
-      Image(systemName: "text.badge.plus")
-        .font(.largeTitle)
-        .foregroundStyle(.secondary)
-      Text("Your queue is empty")
-        .font(.headline)
-      Text("Add audio from your library to play it in order.")
-        .font(.subheadline)
-        .foregroundStyle(.secondary)
-        .multilineTextAlignment(.center)
-    }
-    .frame(maxWidth: .infinity, maxHeight: .infinity)
-    .padding()
-  }
-
-  @available(iOS 27.0, *)
-  private var reorderableQueue: some View {
-    List {
-      ForEach(props.files, id: \.id) { item in
-        queueRow(item)
-      }
-      .reorderable()
-    }
-    .reorderContainer(
-      for: PlayrLibraryAudioItemRecord.self,
-      itemID: \.id
-    ) { difference in
-      applyReorder(difference)
-    }
-    .listStyle(.plain)
-    .scrollContentBackground(.hidden)
-    .background(Color(uiColor: .systemBackground))
-  }
-
-  private var legacyQueue: some View {
-    List {
-      ForEach(props.files, id: \.id) { item in
-        queueRow(item)
-      }
-      .onMove(perform: reorderFiles)
-    }
-    .listStyle(.plain)
-    .scrollContentBackground(.hidden)
-    .background(Color(uiColor: .systemBackground))
-  }
-
-  private func queueRow(_ item: PlayrLibraryAudioItemRecord) -> some View {
-    PlayrEpisodeRow(
-      item: item,
-      isCurrent: props.currentFileId == item.id,
-      isPlaying: props.isPlaying,
-      isRemoving: false
-    )
-    .contentShape(Rectangle())
-    .onTapGesture {
-      props.onOpenFile(["id": item.id])
-    }
-    .contextMenu {
-      Button("Remove from Queue", systemImage: "trash", role: .destructive) {
-        props.onRemoveFromQueue(["id": item.id])
-      }
-    }
-    .swipeActions(edge: .trailing, allowsFullSwipe: true) {
-      Button(role: .destructive) {
-        props.onRemoveFromQueue(["id": item.id])
-      } label: {
-        Label("Remove", systemImage: "trash")
-      }
-      .tint(.red)
-    }
-  }
-
-  @ToolbarContentBuilder
-  private var queueToolbar: some ToolbarContent {
-    if !props.files.isEmpty {
-      ToolbarItem(placement: .topBarTrailing) {
-        Menu {
-          Button("Clear Queue", systemImage: "trash", role: .destructive) {
-            props.onClear()
-          }
-
-          if #unavailable(iOS 27.0) {
-            EditButton()
-          }
-        } label: {
-          Image(systemName: "ellipsis")
+      List {
+        if props.files.isEmpty && props.continuationFiles.isEmpty {
+          ContentUnavailableView("Nothing up next", systemImage: "text.badge.plus",
+            description: Text("Play from your library or add episodes to the queue."))
         }
-        .menuOrder(.fixed)
-        .accessibilityLabel("Queue actions")
+        if !props.files.isEmpty {
+          Section("Next in Queue") { rows(props.files, queued: true) }
+        }
+        if !props.continuationFiles.isEmpty {
+          Section("Next from Library") { rows(props.continuationFiles, queued: false) }
+        }
       }
+      .listStyle(.plain)
+      .scrollContentBackground(.hidden)
+      .background(Color(uiColor: .systemBackground))
+      .safeAreaInset(edge: .bottom) {
+        if props.currentFileId != nil { Color.clear.frame(height: 90) }
+      }
+      .navigationTitle("Queue")
+      .navigationBarTitleDisplayMode(.large)
+      .toolbar {
+        ToolbarItem(placement: .topBarTrailing) {
+          Menu {
+            if !props.files.isEmpty {
+              Button("Clear Queue", systemImage: "trash", role: .destructive) { props.onClear() }
+            }
+            if #unavailable(iOS 27.0) { EditButton() }
+          } label: { Image(systemName: "ellipsis") }
+          .accessibilityLabel("Queue actions")
+        }
+      }
+      .environment(\.editMode, $editMode)
+      .tint(.primary)
     }
   }
 
-  @available(iOS 27.0, *)
-  private func applyReorder(
-    _ difference: ReorderDifference<String, ReorderableSingleCollectionIdentifier>
-  ) {
-    var ids = props.files.map(\.id)
-    let sourceSet = Set(difference.sources)
-    let movingIds = ids.filter(sourceSet.contains)
-    ids.removeAll(where: sourceSet.contains)
-
-    switch difference.destination.position {
-    case .before(let destinationID):
-      let destinationIndex = ids.firstIndex(of: destinationID) ?? ids.endIndex
-      ids.insert(contentsOf: movingIds, at: destinationIndex)
-    case .end:
-      ids.append(contentsOf: movingIds)
+  @ViewBuilder
+  private func rows(_ items: [PlayrLibraryAudioItemRecord], queued: Bool) -> some View {
+    if #available(iOS 27.0, *) {
+      ForEach(items, id: \.id) { item in queueRow(item, queued: queued) }
+        .reorderable()
+        .reorderContainer(for: PlayrLibraryAudioItemRecord.self, itemID: \.id) { difference in
+          var ids = items.map(\.id)
+          let sourceSet = Set(difference.sources)
+          let moving = ids.filter(sourceSet.contains)
+          ids.removeAll(where: sourceSet.contains)
+          switch difference.destination.position {
+          case .before(let destination):
+            ids.insert(contentsOf: moving, at: ids.firstIndex(of: destination) ?? ids.endIndex)
+          case .end:
+            ids.append(contentsOf: moving)
+          }
+          sendOrder(ids, queued: queued)
+        }
+    } else {
+      ForEach(items, id: \.id) { item in queueRow(item, queued: queued) }
+        .onMove { offsets, destination in
+          var ids = items.map(\.id)
+          ids.move(fromOffsets: offsets, toOffset: destination)
+          sendOrder(ids, queued: queued)
+        }
     }
-
-    props.onReorder(["ids": ids])
   }
 
-  private func reorderFiles(fromOffsets: IndexSet, toOffset: Int) {
-    var ids = props.files.map(\.id)
-    ids.move(fromOffsets: fromOffsets, toOffset: toOffset)
-    props.onReorder(["ids": ids])
+  private func sendOrder(_ ids: [String], queued: Bool) {
+    if queued { props.onReorder(["ids": ids]) }
+    else { props.onReorderContinuation(["ids": ids]) }
+  }
+
+  private func queueRow(_ item: PlayrLibraryAudioItemRecord, queued: Bool) -> some View {
+    PlayrEpisodeRow(item: item, isCurrent: false, isPlaying: false, isRemoving: false)
+      .contentShape(Rectangle())
+      .onTapGesture {
+        if queued { props.onOpenFile(["id": item.id]) }
+        else { props.onOpenContinuation(["id": item.id]) }
+      }
+      .accessibilityAddTraits(.isButton)
+      .accessibilityHint("Play this episode")
+      .contextMenu {
+        if queued {
+          Button("Remove from Queue", systemImage: "trash", role: .destructive) {
+            props.onRemoveFromQueue(["id": item.id])
+          }
+        }
+      }
+      .swipeActions(edge: .trailing, allowsFullSwipe: true) {
+        if queued {
+          Button(role: .destructive) { props.onRemoveFromQueue(["id": item.id]) }
+            label: { Label("Remove from Queue", systemImage: "trash") }
+        }
+      }
   }
 }

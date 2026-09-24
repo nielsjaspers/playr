@@ -1,8 +1,7 @@
 export type RepeatMode = 'off' | 'all' | 'one';
 
 export type PlaybackSequence = {
-  kind: 'folder' | 'queue';
-  sourcePath: string | null;
+  sourcePath: string;
   baseIds: string[];
   playOrderIds: string[];
 };
@@ -24,14 +23,12 @@ export function createPlaybackOrder(
 }
 
 export function createPlaybackSequence(
-  kind: PlaybackSequence['kind'],
   ids: string[],
-  sourcePath: string | null,
+  sourcePath: string,
   currentId: string | null,
   shuffle: boolean,
 ): PlaybackSequence {
   return {
-    kind,
     sourcePath,
     baseIds: [...ids],
     playOrderIds: createPlaybackOrder(ids, currentId, shuffle),
@@ -53,15 +50,6 @@ export function getAdjacentPlaybackId(
   if (nextIndex >= 0 && nextIndex < ids.length) return ids[nextIndex];
   if (!wrap) return null;
   return direction === 'next' ? ids[0] : ids.at(-1) ?? null;
-}
-
-export function getCompletionTarget(
-  ids: string[],
-  currentId: string,
-  repeatMode: RepeatMode,
-) {
-  if (repeatMode === 'one') return currentId;
-  return getAdjacentPlaybackId(ids, currentId, 'next', repeatMode === 'all');
 }
 
 export function cycleRepeatMode(current: RepeatMode): RepeatMode {

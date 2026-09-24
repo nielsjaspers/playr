@@ -186,6 +186,26 @@ export async function replaceLibraryCache(files: ICloudAudioFile[]) {
   });
 }
 
+export async function upsertLibraryFiles(files: ICloudAudioFile[]) {
+  if (files.length === 0) return;
+  await storageWriteQueue.run(async () => {
+    const database = await getDatabase();
+    await database.withExclusiveTransactionAsync(async (transaction) => {
+      for (const file of files) {
+        await transaction.runAsync(
+          `INSERT INTO library_items (id, name, relative_path, size, modified_at, download_state,
+            download_progress, local_uri, is_uploaded) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+          ON CONFLICT(id) DO UPDATE SET name = excluded.name, relative_path = excluded.relative_path,
+            size = excluded.size, modified_at = excluded.modified_at, download_state = excluded.download_state,
+            download_progress = excluded.download_progress, local_uri = excluded.local_uri, is_uploaded = excluded.is_uploaded`,
+          file.id, file.name, file.relativePath, file.size, file.modifiedAt,
+          file.downloadState, file.downloadProgress, file.localUri, file.isUploaded ? 1 : 0,
+        );
+      }
+    });
+  });
+}
+
 export async function getPlaybackProgress(): Promise<Map<string, PlaybackProgress>> {
   const database = await getDatabase();
   const rows = await database.getAllAsync<ProgressRow>('SELECT * FROM playback_progress');

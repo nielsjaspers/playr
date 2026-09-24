@@ -6,6 +6,7 @@ import PlayrICloud, {
   type ICloudAvailability,
   type ICloudFolder,
 } from '../modules/playr-icloud';
+import { createFilePreparation } from './filePreparation';
 import { mergeListedFiles, replaceVerifiedFiles } from './libraryFiles';
 import {
   buildItemsByParent,
@@ -25,7 +26,7 @@ import {
   getLibraryOrder,
   getOverdueCompletedIds,
   getPlaybackProgress,
-  getQueueIds,
+  getQueueIds as getStoredQueueIds,
   getReversedFolderPaths,
   remapFolderPathPrefix,
   remapPlaybackFileId,
@@ -38,22 +39,16 @@ import {
   saveFolderOrderReversed,
   saveFolderRememberTimestamps,
   savePlaybackProgress,
+  upsertLibraryFiles,
   type FolderPreferences,
   type PlaybackProgress,
 } from './storage';
 
 const COMPLETED_DOWNLOAD_RETENTION_MS = 7 * 24 * 60 * 60 * 1_000;
-const DOWNLOAD_POLL_INTERVAL_MS = 1_000;
-const DOWNLOAD_POLL_LIMIT = 120;
-
 const DEFAULT_FOLDER_PREFERENCES: FolderPreferences = {
   keepDownloads: false,
   rememberTimestamps: true,
 };
-
-function wait(milliseconds: number) {
-  return new Promise<void>((resolve) => setTimeout(resolve, milliseconds));
-}
 
 export function usePlayrLibrary() {
   const [files, setFiles] = useState<ICloudAudioFile[]>([]);
@@ -72,6 +67,7 @@ export function usePlayrLibrary() {
   const [error, setError] = useState<string | null>(null);
   const [removingIds, setRemovingIds] = useState<Set<string>>(new Set());
   const reversedPathsRef = useRef(reversedFolderPaths);
+  const queueRef = useRef(queueIds);
   const filesRef = useRef(files);
   const foldersRef = useRef(folders);
   const orderRef = useRef(orderByFolder);
@@ -188,7 +184,7 @@ export function usePlayrLibrary() {
       ] = await Promise.all([
         getCachedLibrary(),
         getPlaybackProgress(),
-        getQueueIds(),
+        getStoredQueueIds(),
         getLibraryOrder(),
         getReversedFolderPaths(),
         getFolderPreferences(),
@@ -198,6 +194,7 @@ export function usePlayrLibrary() {
 
       applyFiles(cachedFiles);
       setProgressById(storedProgress);
+      queueRef.current = storedQueue;
       setQueueIds(storedQueue);
       orderRef.current = storedOrder;
       setOrderByFolder(storedOrder);
@@ -232,53 +229,36 @@ export function usePlayrLibrary() {
     return () => subscription.remove();
   }, [refresh]);
 
-  const download = useCallback(async (ids: string[]) => {
-    const cloudIds = ids.filter(
-      (id) => filesRef.current.find((file) => file.id === id)?.downloadState === 'inCloud',
-    );
-    if (cloudIds.length === 0) return [];
-
-    const results = await PlayrICloud.requestDownloadsAsync(cloudIds);
-    const startedIds = results.filter((result) => result.succeeded).map((result) => result.id);
-    const failure = results.find((result) => !result.succeeded);
-    if (failure) setError(failure.error ?? 'A download could not start.');
-    if (startedIds.length === 0) return [];
-
-    const startedSet = new Set(startedIds);
-    applyFiles(
-      filesRef.current.map((file) =>
-        startedSet.has(file.id) ? { ...file, downloadState: 'downloading' } : file,
-      ),
-    );
-
-    let pendingIds = startedIds;
-    const downloadedFiles: ICloudAudioFile[] = [];
-    for (let attempt = 0; attempt < DOWNLOAD_POLL_LIMIT && pendingIds.length > 0; attempt += 1) {
-      await wait(DOWNLOAD_POLL_INTERVAL_MS);
-      const updatedFiles = await PlayrICloud.getAudioFilesAsync(pendingIds);
-      applyFiles(replaceVerifiedFiles(filesRef.current, updatedFiles));
-      downloadedFiles.push(
-        ...updatedFiles.filter((file) => file.downloadState === 'downloaded'),
-      );
-      const downloadedIds = new Set(downloadedFiles.map((file) => file.id));
-      pendingIds = pendingIds.filter((id) => !downloadedIds.has(id));
-    }
-
-    await replaceLibraryCache(filesRef.current);
-    if (pendingIds.length > 0) {
-      setError('The iCloud download is taking longer than expected. It can continue in the background.');
-    }
-    return downloadedFiles;
-  }, [applyFiles]);
-
   const verifyFile = useCallback(async (id: string) => {
     const [verifiedFile] = await PlayrICloud.getAudioFilesAsync([id]);
     if (!verifiedFile) return null;
     const nextFiles = replaceVerifiedFiles(filesRef.current, [verifiedFile]);
-    applyFiles(nextFiles);
-    void replaceLibraryCache(nextFiles);
-    return verifiedFile;
+    if (nextFiles !== filesRef.current) {
+      applyFiles(nextFiles);
+      await upsertLibraryFiles([verifiedFile]);
+    }
+    return verifiedFile.metadataAvailable ? verifiedFile : filesRef.current.find((file) => file.id === id) ?? verifiedFile;
   }, [applyFiles]);
+
+  const preparationRef = useRef<ReturnType<typeof createFilePreparation> | null>(null);
+  if (!preparationRef.current) preparationRef.current = createFilePreparation({
+    verify: verifyFile,
+    request: async (id) => {
+      const [result] = await PlayrICloud.requestDownloadsAsync([id]);
+      if (!result?.succeeded) throw new Error(result?.error ?? 'The download could not start.');
+      applyFiles(filesRef.current.map((file) => file.id === id ? { ...file, downloadState: 'downloading' } : file));
+    },
+  });
+  const prepareFile = preparationRef.current;
+  const download = useCallback(async (ids: string[]) => {
+    const results = await Promise.allSettled(ids.map(prepareFile));
+    const downloaded: ICloudAudioFile[] = [];
+    for (const result of results) {
+      if (result.status === 'fulfilled') downloaded.push(result.value);
+      else setError(result.reason instanceof Error ? result.reason.message : 'A download could not finish.');
+    }
+    return downloaded;
+  }, [prepareFile]);
 
   const removeDownloads = useCallback(async (ids: string[]) => {
     setError(null);
@@ -356,9 +336,10 @@ export function usePlayrLibrary() {
       setFolderPreferencesByPath(remappedFolderPreferences);
       const [storedProgress, storedQueue] = await Promise.all([
         getPlaybackProgress(),
-        getQueueIds(),
+        getStoredQueueIds(),
       ]);
       setProgressById(storedProgress);
+      queueRef.current = storedQueue;
       setQueueIds(storedQueue);
       await refresh();
       return renamedFolder;
@@ -382,7 +363,8 @@ export function usePlayrLibrary() {
         next.set(movedFile.id, { ...progress, fileId: movedFile.id });
         return next;
       });
-      setQueueIds((current) => current.map((fileId) => (fileId === id ? movedFile.id : fileId)));
+      queueRef.current = queueRef.current.map((fileId) => fileId === id ? movedFile.id : fileId);
+      setQueueIds(queueRef.current);
       const nextFiles = filesRef.current.map((file) => (file.id === id ? movedFile : file));
       applyFiles(nextFiles);
       await replaceLibraryCache(nextFiles);
@@ -452,25 +434,30 @@ export function usePlayrLibrary() {
     await savePlaybackProgress(nextProgress);
   }, []);
 
+  const getQueueIds = useCallback(() => queueRef.current, []);
   const addToQueue = useCallback(async (fileId: string) => {
-    if (queueIds.includes(fileId)) return;
-    setQueueIds((current) => [...current, fileId]);
+    if (queueRef.current.includes(fileId)) return;
+    queueRef.current = [...queueRef.current, fileId];
+    setQueueIds(queueRef.current);
     await persistQueueItem(fileId);
-  }, [queueIds]);
+  }, []);
 
   const removeFromQueue = useCallback(async (fileId: string) => {
-    setQueueIds((current) => current.filter((id) => id !== fileId));
+    queueRef.current = queueRef.current.filter((id) => id !== fileId);
+    setQueueIds(queueRef.current);
     await persistQueueRemoval(fileId);
   }, []);
 
   const clearQueue = useCallback(async () => {
+    queueRef.current = [];
     setQueueIds([]);
     await persistQueueClear();
   }, []);
 
   const reorderQueue = useCallback(async (fileIds: string[]) => {
-    setQueueIds(fileIds);
-    await replaceQueue(fileIds);
+    queueRef.current = [...new Set(fileIds)];
+    setQueueIds(queueRef.current);
+    await replaceQueue(queueRef.current);
   }, []);
 
   const clearError = useCallback(() => setError(null), []);
@@ -493,6 +480,8 @@ export function usePlayrLibrary() {
     refresh,
     verifyFile,
     download,
+    prepareFile,
+    getQueueIds,
     removeDownloads,
     createFolder,
     renameFolder,

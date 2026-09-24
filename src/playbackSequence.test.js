@@ -4,20 +4,9 @@ import {
   createPlaybackOrder,
   cycleRepeatMode,
   getAdjacentPlaybackId,
-  getCompletionTarget,
 } from './playbackSequence';
 
 describe('playback sequence', () => {
-  test('plays the next item without wrapping when repeat is off', () => {
-    expect(getCompletionTarget(['one', 'two'], 'one', 'off')).toBe('two');
-    expect(getCompletionTarget(['one', 'two'], 'two', 'off')).toBeNull();
-  });
-
-  test('loops the sequence or the current item', () => {
-    expect(getCompletionTarget(['one', 'two'], 'two', 'all')).toBe('one');
-    expect(getCompletionTarget(['one', 'two'], 'two', 'one')).toBe('two');
-  });
-
   test('manual previous and next navigation can wrap', () => {
     expect(getAdjacentPlaybackId(['one', 'two'], 'one', 'previous', true)).toBe('two');
     expect(getAdjacentPlaybackId(['one', 'two'], 'two', 'next', false)).toBeNull();

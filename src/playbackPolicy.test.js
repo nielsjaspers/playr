@@ -2,7 +2,6 @@ import { describe, expect, test } from 'bun:test';
 
 import {
   advanceFinishGate,
-  cloudPlaybackBehavior,
   createFinishGate,
   resolveResumePosition,
 } from './playbackPolicy';
@@ -51,10 +50,4 @@ describe('playback policy', () => {
     expect(resolveResumePosition(finished, true)).toBe(0);
   });
 
-  test('prompts only for direct cloud-file taps', () => {
-    expect(cloudPlaybackBehavior('direct', false)).toBe('prompt');
-    expect(cloudPlaybackBehavior('direct', true)).toBe('downloadAndPlay');
-    expect(cloudPlaybackBehavior('automatic', false)).toBe('downloadForNext');
-    expect(cloudPlaybackBehavior('automatic', true)).toBe('downloadForNext');
-  });
 });

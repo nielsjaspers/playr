@@ -1,5 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
+  ActivityIndicator,
+  Pressable,
   Animated,
   Modal,
   PanResponder,
@@ -84,6 +86,8 @@ export function PlayerModal({
   onNext,
   onPrevious,
   onClose,
+  pendingName,
+  onCancelPending,
 }: {
   isVisible: boolean;
   palette: Palette;
@@ -95,17 +99,17 @@ export function PlayerModal({
   onNext: () => Promise<boolean>;
   onPrevious: () => Promise<boolean>;
   onClose: () => void;
+  pendingName: string | null;
+  onCancelPending: () => void;
 }) {
   const viewport = useWindowDimensions();
   const layout = getPlayerLayout(viewport.width, viewport.height);
   const artworkTranslation = useRef(new Animated.Value(0)).current;
   const onNextRef = useRef(onNext);
   const onPreviousRef = useRef(onPrevious);
-  const viewportWidthRef = useRef(viewport.width);
 
   onNextRef.current = onNext;
   onPreviousRef.current = onPrevious;
-  viewportWidthRef.current = viewport.width;
 
   const artworkPanResponder = useMemo(
     () =>
@@ -130,25 +134,10 @@ export function PlayerModal({
               ? onPreviousRef.current
               : null;
           if (navigate) {
-            const exitPosition = direction === 'next'
-              ? -viewportWidthRef.current
-              : viewportWidthRef.current;
-            Animated.timing(artworkTranslation, {
-              toValue: exitPosition,
-              duration: 120,
-              useNativeDriver: true,
-            }).start(({ finished }) => {
-              if (!finished) return;
-              void navigate().then((didMove) => {
-                if (didMove) artworkTranslation.setValue(-exitPosition);
-                Animated.spring(artworkTranslation, {
-                  toValue: 0,
-                  damping: 20,
-                  stiffness: 190,
-                  useNativeDriver: true,
-                }).start();
-              });
-            });
+            void navigate();
+            Animated.spring(artworkTranslation, {
+              toValue: 0, damping: 20, stiffness: 190, useNativeDriver: true,
+            }).start();
             return;
           }
           Animated.spring(artworkTranslation, {
@@ -215,6 +204,15 @@ export function PlayerModal({
               </Text>
             </View>
 
+            {pendingName && (
+              <View style={styles.pendingRow}>
+                <ActivityIndicator color={palette.secondaryLabel} />
+                <Text numberOfLines={1} style={{ flex: 1, color: palette.secondaryLabel }}>Preparing {pendingName}</Text>
+                <Pressable accessibilityRole="button" onPress={onCancelPending} hitSlop={12}>
+                  <Text style={{ color: palette.accent }}>Cancel</Text>
+                </Pressable>
+              </View>
+            )}
             <PlayerScrubber
               currentTime={playback.status.currentTime}
               duration={playback.status.duration}
@@ -291,6 +289,7 @@ export function PlayerModal({
 }
 
 const styles = StyleSheet.create({
+  pendingRow: { flexDirection: 'row', alignItems: 'center', gap: 8, marginTop: 12 },
   screen: {
     flex: 1,
   },

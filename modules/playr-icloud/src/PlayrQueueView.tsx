@@ -12,6 +12,9 @@ export type PlayrQueueViewProps = {
   currentFileId: string | null;
   isPlaying: boolean;
   files: PlayrLibraryAudioItem[];
+  continuationFiles: PlayrLibraryAudioItem[];
+  onOpenContinuation: (event: IdEvent) => void;
+  onReorderContinuation: (event: IdsEvent) => void;
   onOpenFile: (event: IdEvent) => void;
   onRemoveFromQueue: (event: IdEvent) => void;
   onReorder: (event: IdsEvent) => void;

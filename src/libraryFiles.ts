@@ -26,5 +26,19 @@ export function replaceVerifiedFiles(
       .filter((file) => file.metadataAvailable !== false)
       .map((file) => [file.id, file]),
   );
-  return currentFiles.map((file) => verifiedById.get(file.id) ?? file);
+  let changed = false;
+  const next = currentFiles.map((file) => {
+    const verified = verifiedById.get(file.id);
+    if (!verified || sameFileMetadata(file, verified)) return file;
+    changed = true;
+    return verified;
+  });
+  return changed ? next : currentFiles;
+}
+
+export function sameFileMetadata(left: ICloudAudioFile, right: ICloudAudioFile) {
+  return left.id === right.id && left.name === right.name && left.relativePath === right.relativePath &&
+    left.size === right.size && left.modifiedAt === right.modifiedAt && left.downloadState === right.downloadState &&
+    left.downloadProgress === right.downloadProgress && left.localUri === right.localUri &&
+    left.isUploaded === right.isUploaded && left.metadataAvailable === right.metadataAvailable;
 }

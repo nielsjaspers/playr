@@ -47,10 +47,3 @@ export function resolveResumePosition(
   return Math.max(0, Math.min(progress?.position ?? 0, progress?.duration ?? 0));
 }
 
-export function cloudPlaybackBehavior(
-  trigger: 'direct' | 'automatic',
-  skipDirectPrompt: boolean,
-) {
-  if (trigger === 'automatic') return 'downloadForNext' as const;
-  return skipDirectPrompt ? 'downloadAndPlay' as const : 'prompt' as const;
-}
