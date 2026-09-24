@@ -33,7 +33,6 @@ import {
   replaceLibraryCache,
   replaceLibraryOrder,
   replaceQueue,
-  replaceReversedFolderPaths,
   saveAutoDownloadOnTap,
   saveFolderKeepDownloads,
   saveFolderOrderReversed,
@@ -72,6 +71,7 @@ export function usePlayrLibrary() {
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [removingIds, setRemovingIds] = useState<Set<string>>(new Set());
+  const reversedPathsRef = useRef(reversedFolderPaths);
   const filesRef = useRef(files);
   const foldersRef = useRef(folders);
   const orderRef = useRef(orderByFolder);
@@ -201,6 +201,7 @@ export function usePlayrLibrary() {
       setQueueIds(storedQueue);
       orderRef.current = storedOrder;
       setOrderByFolder(storedOrder);
+      reversedPathsRef.current = storedReversedPaths;
       setReversedFolderPaths(storedReversedPaths);
       folderPreferencesRef.current = storedFolderPreferences;
       setFolderPreferencesByPath(storedFolderPreferences);
@@ -329,6 +330,8 @@ export function usePlayrLibrary() {
     setError(null);
     try {
       const renamedFolder = await PlayrICloud.renameFolderAsync(relativePath, name);
+      if (renamedFolder.relativePath === relativePath) return renamedFolder;
+      await remapFolderPathPrefix(relativePath, renamedFolder.relativePath);
       const remappedOrder = remapLibraryOrderPaths(
         orderRef.current,
         relativePath,
@@ -340,19 +343,17 @@ export function usePlayrLibrary() {
         path === relativePath || path.startsWith(`${relativePath}/`)
           ? `${renamedFolder.relativePath}${path.slice(relativePath.length)}`
           : path;
-      const remappedReversedPaths = new Set([...reversedFolderPaths].map(remapPath));
+      const remappedReversedPaths = new Set([...reversedPathsRef.current].map(remapPath));
       const remappedFolderPreferences = new Map(
         [...folderPreferencesRef.current].map(([path, preferences]) => [
           remapPath(path),
           preferences,
         ]),
       );
+      reversedPathsRef.current = remappedReversedPaths;
       setReversedFolderPaths(remappedReversedPaths);
       folderPreferencesRef.current = remappedFolderPreferences;
       setFolderPreferencesByPath(remappedFolderPreferences);
-      await replaceLibraryOrder(remappedOrder);
-      await replaceReversedFolderPaths(remappedReversedPaths);
-      await remapFolderPathPrefix(relativePath, renamedFolder.relativePath);
       const [storedProgress, storedQueue] = await Promise.all([
         getPlaybackProgress(),
         getQueueIds(),
@@ -366,7 +367,7 @@ export function usePlayrLibrary() {
       setError(message);
       throw caughtError;
     }
-  }, [refresh, reversedFolderPaths]);
+  }, [refresh]);
 
   const moveFile = useCallback(async (id: string, destinationFolderPath: string) => {
     setError(null);
@@ -395,14 +396,12 @@ export function usePlayrLibrary() {
   }, [applyFiles, applyOrganization]);
 
   const toggleFolderOrder = useCallback(async (parentPath: string) => {
-    let nextValue = false;
-    setReversedFolderPaths((current) => {
-      const next = new Set(current);
-      nextValue = !next.has(parentPath);
-      if (nextValue) next.add(parentPath);
-      else next.delete(parentPath);
-      return next;
-    });
+    const next = new Set(reversedPathsRef.current);
+    const nextValue = !next.has(parentPath);
+    if (nextValue) next.add(parentPath);
+    else next.delete(parentPath);
+    reversedPathsRef.current = next;
+    setReversedFolderPaths(next);
     await saveFolderOrderReversed(parentPath, nextValue);
   }, []);
 

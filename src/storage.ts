@@ -1,6 +1,7 @@
 import { openDatabaseAsync, type SQLiteDatabase } from 'expo-sqlite';
 
 import type { ICloudAudioFile } from '../modules/playr-icloud';
+import { remapLibraryOrderPaths } from './libraryOrganization';
 import { createSerialTaskQueue } from './serialTaskQueue';
 
 export type PlaybackProgress = {
@@ -57,74 +58,82 @@ const storageWriteQueue = createSerialTaskQueue();
 async function getDatabase() {
   if (!databasePromise) {
     databasePromise = openDatabaseAsync('playr.db').then(async (database) => {
-      await database.execAsync(`
-        PRAGMA journal_mode = WAL;
-        PRAGMA foreign_keys = ON;
+      try {
+        await database.execAsync(`
+          PRAGMA journal_mode = WAL;
+          PRAGMA foreign_keys = ON;
 
-        CREATE TABLE IF NOT EXISTS library_items (
-          id TEXT PRIMARY KEY NOT NULL,
-          name TEXT NOT NULL,
-          relative_path TEXT NOT NULL,
-          size INTEGER NOT NULL,
-          modified_at INTEGER,
-          download_state TEXT NOT NULL,
-          download_progress REAL,
-          local_uri TEXT,
-          is_uploaded INTEGER NOT NULL
+          CREATE TABLE IF NOT EXISTS library_items (
+            id TEXT PRIMARY KEY NOT NULL,
+            name TEXT NOT NULL,
+            relative_path TEXT NOT NULL,
+            size INTEGER NOT NULL,
+            modified_at INTEGER,
+            download_state TEXT NOT NULL,
+            download_progress REAL,
+            local_uri TEXT,
+            is_uploaded INTEGER NOT NULL
+          );
+
+          CREATE TABLE IF NOT EXISTS playback_progress (
+            file_id TEXT PRIMARY KEY NOT NULL,
+            position_seconds REAL NOT NULL,
+            duration_seconds REAL NOT NULL,
+            completed_at INTEGER,
+            updated_at INTEGER NOT NULL
+          );
+
+          CREATE INDEX IF NOT EXISTS playback_progress_completed_at
+            ON playback_progress(completed_at);
+
+          CREATE TABLE IF NOT EXISTS queue_items (
+            file_id TEXT PRIMARY KEY NOT NULL,
+            position INTEGER NOT NULL UNIQUE
+          );
+
+          CREATE TABLE IF NOT EXISTS library_order (
+            parent_path TEXT NOT NULL,
+            item_key TEXT NOT NULL,
+            position INTEGER NOT NULL,
+            PRIMARY KEY (parent_path, item_key),
+            UNIQUE (parent_path, position)
+          );
+
+          CREATE TABLE IF NOT EXISTS folder_preferences (
+            parent_path TEXT PRIMARY KEY NOT NULL,
+            is_reversed INTEGER NOT NULL DEFAULT 0,
+            keep_downloads INTEGER NOT NULL DEFAULT 0,
+            remember_timestamps INTEGER NOT NULL DEFAULT 1
+          );
+
+          CREATE TABLE IF NOT EXISTS app_preferences (
+            key TEXT PRIMARY KEY NOT NULL,
+            value TEXT NOT NULL
+          );
+        `);
+
+        const folderPreferenceColumns = await database.getAllAsync<{ name: string }>(
+          'PRAGMA table_info(folder_preferences)',
         );
-
-        CREATE TABLE IF NOT EXISTS playback_progress (
-          file_id TEXT PRIMARY KEY NOT NULL,
-          position_seconds REAL NOT NULL,
-          duration_seconds REAL NOT NULL,
-          completed_at INTEGER,
-          updated_at INTEGER NOT NULL
-        );
-
-        CREATE INDEX IF NOT EXISTS playback_progress_completed_at
-          ON playback_progress(completed_at);
-
-        CREATE TABLE IF NOT EXISTS queue_items (
-          file_id TEXT PRIMARY KEY NOT NULL,
-          position INTEGER NOT NULL UNIQUE
-        );
-
-        CREATE TABLE IF NOT EXISTS library_order (
-          parent_path TEXT NOT NULL,
-          item_key TEXT NOT NULL,
-          position INTEGER NOT NULL,
-          PRIMARY KEY (parent_path, item_key),
-          UNIQUE (parent_path, position)
-        );
-
-        CREATE TABLE IF NOT EXISTS folder_preferences (
-          parent_path TEXT PRIMARY KEY NOT NULL,
-          is_reversed INTEGER NOT NULL DEFAULT 0,
-          keep_downloads INTEGER NOT NULL DEFAULT 0,
-          remember_timestamps INTEGER NOT NULL DEFAULT 1
-        );
-
-        CREATE TABLE IF NOT EXISTS app_preferences (
-          key TEXT PRIMARY KEY NOT NULL,
-          value TEXT NOT NULL
-        );
-      `);
-
-      const folderPreferenceColumns = await database.getAllAsync<{ name: string }>(
-        'PRAGMA table_info(folder_preferences)',
-      );
-      const columnNames = new Set(folderPreferenceColumns.map((column) => column.name));
-      if (!columnNames.has('keep_downloads')) {
-        await database.execAsync(
-          'ALTER TABLE folder_preferences ADD COLUMN keep_downloads INTEGER NOT NULL DEFAULT 0',
-        );
+        const columnNames = new Set(folderPreferenceColumns.map((column) => column.name));
+        if (!columnNames.has('keep_downloads')) {
+          await database.execAsync(
+            'ALTER TABLE folder_preferences ADD COLUMN keep_downloads INTEGER NOT NULL DEFAULT 0',
+          );
+        }
+        if (!columnNames.has('remember_timestamps')) {
+          await database.execAsync(
+            'ALTER TABLE folder_preferences ADD COLUMN remember_timestamps INTEGER NOT NULL DEFAULT 1',
+          );
+        }
+        return database;
+      } catch (error) {
+        await database.closeAsync().catch(() => undefined);
+        throw error;
       }
-      if (!columnNames.has('remember_timestamps')) {
-        await database.execAsync(
-          'ALTER TABLE folder_preferences ADD COLUMN remember_timestamps INTEGER NOT NULL DEFAULT 1',
-        );
-      }
-      return database;
+    }).catch((error: unknown) => {
+      databasePromise = null;
+      throw error;
     });
   }
 
@@ -389,22 +398,6 @@ export async function saveFolderOrderReversed(parentPath: string, reversed: bool
   });
 }
 
-export async function replaceReversedFolderPaths(parentPaths: Set<string>) {
-  await storageWriteQueue.run(async () => {
-    const database = await getDatabase();
-    await database.withExclusiveTransactionAsync(async (transaction) => {
-      await transaction.runAsync('UPDATE folder_preferences SET is_reversed = 0');
-      for (const parentPath of parentPaths) {
-        await transaction.runAsync(
-          `INSERT INTO folder_preferences (parent_path, is_reversed) VALUES (?, 1)
-            ON CONFLICT(parent_path) DO UPDATE SET is_reversed = 1`,
-          parentPath,
-        );
-      }
-    });
-  });
-}
-
 export async function remapPlaybackFileId(oldId: string, newId: string) {
   await storageWriteQueue.run(async () => {
     const database = await getDatabase();
@@ -424,31 +417,32 @@ export async function remapPlaybackFileId(oldId: string, newId: string) {
 }
 
 export async function remapFolderPathPrefix(oldPath: string, newPath: string) {
+  if (oldPath === newPath) return;
   await storageWriteQueue.run(async () => {
     const database = await getDatabase();
-    const oldPrefix = `${oldPath}/`;
-    const progressRows = await database.getAllAsync<{ file_id: string }>(
-      'SELECT file_id FROM playback_progress WHERE file_id = ? OR substr(file_id, 1, ?) = ?',
-      oldPath,
-      oldPrefix.length,
-      oldPrefix,
-    );
-    const queueRows = await database.getAllAsync<{ file_id: string }>(
-      'SELECT file_id FROM queue_items WHERE file_id = ? OR substr(file_id, 1, ?) = ?',
-      oldPath,
-      oldPrefix.length,
-      oldPrefix,
-    );
-    const preferenceRows = await database.getAllAsync<FolderPreferenceRow>(
-      'SELECT * FROM folder_preferences WHERE parent_path = ? OR substr(parent_path, 1, ?) = ?',
-      oldPath,
-      oldPrefix.length,
-      oldPrefix,
-    );
-
-    const remap = (path: string) =>
-      path === oldPath ? newPath : `${newPath}/${path.slice(oldPrefix.length)}`;
     await database.withExclusiveTransactionAsync(async (transaction) => {
+      const oldPrefix = `${oldPath}/`;
+      const progressRows = await transaction.getAllAsync<{ file_id: string }>(
+        'SELECT file_id FROM playback_progress WHERE file_id = ? OR substr(file_id, 1, length(?)) = ?',
+        oldPath,
+        oldPrefix,
+        oldPrefix,
+      );
+      const queueRows = await transaction.getAllAsync<{ file_id: string }>(
+        'SELECT file_id FROM queue_items WHERE file_id = ? OR substr(file_id, 1, length(?)) = ?',
+        oldPath,
+        oldPrefix,
+        oldPrefix,
+      );
+      const preferenceRows = await transaction.getAllAsync<FolderPreferenceRow>(
+        'SELECT * FROM folder_preferences WHERE parent_path = ? OR substr(parent_path, 1, length(?)) = ?',
+        oldPath,
+        oldPrefix,
+        oldPrefix,
+      );
+
+      const remap = (path: string) =>
+        path === oldPath ? newPath : `${newPath}/${path.slice(oldPrefix.length)}`;
       for (const row of progressRows) {
         await transaction.runAsync(
           'UPDATE OR REPLACE playback_progress SET file_id = ? WHERE file_id = ?',
@@ -462,6 +456,24 @@ export async function remapFolderPathPrefix(oldPath: string, newPath: string) {
           remap(row.file_id),
           row.file_id,
         );
+      }
+      const orderRows = await transaction.getAllAsync<OrderRow>(
+        'SELECT * FROM library_order ORDER BY parent_path, position',
+      );
+      const order = new Map<string, string[]>();
+      for (const row of orderRows) {
+        const keys = order.get(row.parent_path) ?? [];
+        keys.push(row.item_key);
+        order.set(row.parent_path, keys);
+      }
+      await transaction.runAsync('DELETE FROM library_order');
+      for (const [parent, keys] of remapLibraryOrderPaths(order, oldPath, newPath)) {
+        for (const [position, key] of keys.entries()) {
+          await transaction.runAsync(
+            'INSERT INTO library_order (parent_path, item_key, position) VALUES (?, ?, ?)',
+            parent, key, position,
+          );
+        }
       }
       for (const row of preferenceRows) {
         await transaction.runAsync(
