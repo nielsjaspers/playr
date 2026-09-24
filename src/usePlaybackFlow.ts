@@ -4,7 +4,7 @@ import { Alert } from 'react-native';
 import type { ICloudAudioFile } from '../modules/playr-icloud';
 import { createPlaybackRequests, type PlaybackRequest } from './playbackIntent';
 import { createPlaybackOrder, createPlaybackSequence, cycleRepeatMode, type PlaybackSequence, type RepeatMode } from './playbackSequence';
-import { acceptPlayback, emptyPlaybackSession, getLibraryContinuation, getPlaybackTarget, type PlaybackSession, type PlaybackTarget } from './playbackSession';
+import { acceptPlayback, emptyPlaybackSession, moveLibraryContinuation, removeLibraryContinuation, getLibraryContinuation, getPlaybackTarget, type PlaybackSession, type PlaybackTarget } from './playbackSession';
 import { orderFiles, parentFolderPath } from './libraryOrganization';
 import type { usePlayback } from './usePlayback';
 import type { usePlayrLibrary } from './usePlayrLibrary';
@@ -203,15 +203,23 @@ export function usePlaybackFlow(library: Library, playback: Playback, onError: (
     });
   }, [cancelPending, updateSession]);
 
-  const continuationIds = useMemo(() => getLibraryContinuation(session, repeatMode), [session, repeatMode]);
-  const reorderContinuation = useCallback((ids: string[]) => {
-    const current = sessionRef.current;
-    if (!current.sequence) return;
-    const remaining = new Set(ids);
-    updateSession({ ...current, sequence: { ...current.sequence,
-      playOrderIds: [...current.sequence.playOrderIds.filter((id) => !remaining.has(id)), ...ids],
-    } });
+  const moveContinuation = useCallback(async (ids: string[], beforeId: string | null, fromQueue = false) => {
+    const currentLibrary = libraryRef.current;
+    const available = new Set(currentLibrary.files.map((file) => file.id));
+    const queued = new Set(currentLibrary.getQueueIds());
+    const moving = ids.filter((id) => available.has(id) && (!fromQueue || queued.has(id)));
+    const removals = fromQueue ? moving.map((id) => currentLibrary.removeFromQueue(id)) : [];
+    updateSession(moveLibraryContinuation(sessionRef.current, moving, beforeId, repeatRef.current, fromQueue));
+    await Promise.all(removals);
   }, [updateSession]);
+
+  const queueContinuation = useCallback((ids: string[], beforeId: string | null) => {
+    const queued = libraryRef.current.moveQueueItems(ids, beforeId, false);
+    updateSession(removeLibraryContinuation(sessionRef.current, ids));
+    return queued;
+  }, [updateSession]);
+
+  const continuationIds = useMemo(() => getLibraryContinuation(session, repeatMode), [session, repeatMode]);
 
   // Queue edits can cancel an item that is still being prepared for playback.
   useEffect(() => {
@@ -232,6 +240,6 @@ export function usePlaybackFlow(library: Library, playback: Playback, onError: (
     openLibraryFile, playFolder, navigate, toggle, stop, cancelPending, toggleShuffle, advanceRepeatMode,
     openQueueFile: (id: string) => select({ id, source: 'queue' }),
     openContinuation: (id: string) => select({ id, source: 'library' }),
-    reorderContinuation, remapPath,
+    moveContinuation, queueContinuation, remapPath,
   };
 }

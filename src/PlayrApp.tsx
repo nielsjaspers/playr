@@ -20,7 +20,7 @@ import {
   type ICloudAudioFile,
   type PlayrLibraryAudioItem,
 } from '../modules/playr-icloud';
-import { formatDuration } from './components/EpisodeRow';
+import { formatDuration, episodeProgressLabel } from './episodeProgress';
 import { PlayerModal } from './components/PlayerModal';
 import {
   getContinueListeningFiles,
@@ -275,12 +275,12 @@ export default function PlayrApp() {
         size: file.size,
         downloadState: file.downloadState,
         downloadProgress: file.downloadProgress,
-        progressPosition: progress?.position ?? null,
-        progressDuration: progress?.duration ?? null,
+        progressLabel: episodeProgressLabel(progress,
+          library.folderPreferencesByPath.get(parentFolderPath(file.relativePath))?.rememberTimestamps ?? true),
         completedAt: progress?.completedAt ?? null,
         contextLabel,
       };
-    }, [library.progressById]);
+    }, [library.progressById, library.folderPreferencesByPath]);
 
   const filesById = useMemo(() => new Map(library.files.map((file) => [file.id, file])), [library.files]);
   const libraryScreen = useMemo(() => {
@@ -376,6 +376,7 @@ export default function PlayrApp() {
               const file = filesById.get(nativeEvent.id);
               if (file) report(addFileToQueue(file));
             }}
+            onRemoveFromQueue={({ nativeEvent }) => report(library.removeFromQueue(nativeEvent.id))}
             onBack={() => {
               setCurrentFolderPath(parentFolderPath(currentFolderPath));
               setSearchQuery('');
@@ -449,8 +450,25 @@ export default function PlayrApp() {
     );
   };
 
+  const queueProps = {
+    currentFileId: playback.currentFile?.id ?? null,
+    files: queueScreen.nativeQueueFiles,
+    continuationFiles: queueScreen.continuationFiles,
+    isPlaying: playback.status.playing,
+    repeatMode,
+    onClear: () => report(library.clearQueue()),
+    onOpenFile: ({ nativeEvent }) => report(flow.openQueueFile(nativeEvent.id)),
+    onRemoveFromQueue: ({ nativeEvent }) => report(library.removeFromQueue(nativeEvent.id)),
+    onAddToQueue: ({ nativeEvent }) => report(flow.queueContinuation([nativeEvent.id], null)),
+    continuationAnchorId: flow.session.libraryFileId,
+    onQueueDrop: ({ nativeEvent }) => report(nativeEvent.fromQueue
+      ? library.moveQueueItems(nativeEvent.ids, nativeEvent.beforeId, true)
+      : flow.queueContinuation(nativeEvent.ids, nativeEvent.beforeId)),
+    onContinuationDrop: ({ nativeEvent }) => report(flow.moveContinuation(nativeEvent.ids, nativeEvent.beforeId, nativeEvent.fromQueue)),
+    onOpenContinuation: ({ nativeEvent }) => report(flow.openContinuation(nativeEvent.id)),
+  } satisfies React.ComponentProps<typeof PlayrQueueView>;
+
   const renderQueueScreen = () => {
-    const { nativeQueueFiles, continuationFiles } = queueScreen;
     return (
       <View style={[styles.safeArea, { backgroundColor: palette.background }]}>
         {library.availability !== 'available' ? (
@@ -463,19 +481,7 @@ export default function PlayrApp() {
         ) : library.isLoading ? (
           <ActivityIndicator color={palette.secondaryLabel} style={styles.loading} />
         ) : (
-          <PlayrQueueView
-            currentFileId={playback.currentFile?.id ?? null}
-            files={nativeQueueFiles}
-            isPlaying={playback.status.playing}
-            onClear={() => report(library.clearQueue())}
-            onOpenFile={({ nativeEvent }) => report(flow.openQueueFile(nativeEvent.id))}
-            onRemoveFromQueue={({ nativeEvent }) => report(library.removeFromQueue(nativeEvent.id))}
-            onReorder={({ nativeEvent }) => report(library.reorderQueue(nativeEvent.ids))}
-            continuationFiles={continuationFiles}
-            onOpenContinuation={({ nativeEvent }) => report(flow.openContinuation(nativeEvent.id))}
-            onReorderContinuation={({ nativeEvent }) => flow.reorderContinuation(nativeEvent.ids)}
-            style={styles.nativeQueueView}
-          />
+          <PlayrQueueView {...queueProps} style={styles.nativeQueueView} />
         )}
         {renderMiniPlayer()}
       </View>
@@ -522,6 +528,7 @@ export default function PlayrApp() {
       </Host>
 
       <PlayerModal
+        queueProps={queueProps}
         isVisible={isPlayerOpen}
         onCycleRepeat={advanceRepeatMode}
         onClose={() => setIsPlayerOpen(false)}

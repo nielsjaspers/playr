@@ -8,8 +8,7 @@ export type PlayrLibraryAudioItem = Pick<
   ICloudAudioFile,
   'id' | 'name' | 'relativePath' | 'size' | 'downloadState' | 'downloadProgress'
 > & {
-  progressPosition: number | null;
-  progressDuration: number | null;
+  progressLabel: string | null;
   completedAt: number | null;
   contextLabel: string | null;
 };
@@ -49,6 +48,7 @@ export type PlayrLibraryViewProps = {
   onBack: () => void;
   onOpenFile: (event: IdEvent) => void;
   onAddToQueue: (event: IdEvent) => void;
+  onRemoveFromQueue: (event: IdEvent) => void;
   onRemoveDownloads: (event: IdsEvent) => void;
   onDownloadFiles: (event: IdsEvent) => void;
   onMoveFiles: (event: MoveEvent) => void;

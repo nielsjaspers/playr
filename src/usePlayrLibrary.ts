@@ -7,6 +7,7 @@ import PlayrICloud, {
   type ICloudFolder,
 } from '../modules/playr-icloud';
 import { createLibraryRefresh } from './libraryRefresh';
+import { moveItemsBefore } from './queueOrder';
 import { createFilePreparation } from './filePreparation';
 import { mergeListedFiles, replaceVerifiedFiles } from './libraryFiles';
 import {
@@ -493,8 +494,9 @@ export function usePlayrLibrary() {
     await persistQueueClear();
   }, []);
 
-  const reorderQueue = useCallback(async (fileIds: string[]) => {
-    queueRef.current = [...new Set(fileIds)];
+  const moveQueueItems = useCallback(async (fileIds: string[], beforeId: string | null, fromQueue: boolean) => {
+    const available = new Set(filesRef.current.map((file) => file.id));
+    queueRef.current = moveItemsBefore(queueRef.current, fileIds.filter((id) => available.has(id)), beforeId, !fromQueue);
     setQueueIds(queueRef.current);
     await replaceQueue(queueRef.current);
   }, []);
@@ -536,6 +538,6 @@ export function usePlayrLibrary() {
     addToQueue,
     removeFromQueue,
     clearQueue,
-    reorderQueue,
+    moveQueueItems,
   };
 }

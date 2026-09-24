@@ -3,10 +3,12 @@ import ExpoModulesCore
 import SwiftUI
 import UniformTypeIdentifiers
 
-private let playrAudioDragType = UTType(exportedAs: "com.nielsjaspers.playr.audio-item")
+private let playrAudioDragType = UTType(exportedAs: "com.nielsjaspers.playr.audio-item", conformingTo: .data)
 
 private struct PlayrAudioDragItem: Codable, Hashable, Identifiable, Sendable, Transferable {
   let id: String
+  var origin: Origin = .library
+  enum Origin: String, Codable { case library, queue, continuation }
 
   static var transferRepresentation: some TransferRepresentation {
     CodableRepresentation(contentType: playrAudioDragType)
@@ -20,8 +22,7 @@ public struct PlayrLibraryAudioItemRecord: Record {
   @Field var size: Int64 = 0
   @Field var downloadState: String = "inCloud"
   @Field var downloadProgress: Double?
-  @Field var progressPosition: Double?
-  @Field var progressDuration: Double?
+  @Field var progressLabel: String?
   @Field var completedAt: Double?
   @Field var contextLabel: String?
 
@@ -60,6 +61,7 @@ public final class PlayrLibraryViewProps: ExpoSwiftUI.ViewProps {
   var onBack = EventDispatcher()
   var onOpenFile = EventDispatcher()
   var onAddToQueue = EventDispatcher()
+  var onRemoveFromQueue = EventDispatcher()
   var onRemoveDownloads = EventDispatcher()
   var onDownloadFiles = EventDispatcher()
   var onMoveFiles = EventDispatcher()
@@ -315,7 +317,7 @@ private struct PlayrEpisodeRow: View {
         Text(detail)
           .font(.subheadline)
           .foregroundStyle(.secondary)
-          .lineLimit(1)
+          .lineLimit(2)
 
       }
     }
@@ -342,6 +344,8 @@ private struct PlayrEpisodeRow: View {
       } else {
         base = "Downloading from iCloud"
       }
+    } else if let progress = item.progressLabel {
+      base = item.downloadState == "inCloud" ? "\(progress) · In iCloud" : progress
     } else if item.completedAt != nil {
       base = "Played"
     } else if item.downloadState == "downloaded" {
@@ -561,6 +565,17 @@ public struct PlayrLibraryView: ExpoSwiftUI.View, ExpoSwiftUI.WithHostingView {
         ForEach(props.directFiles, id: \.id) { item in
           episodeRow(item)
         }
+        .dropDestination(for: PlayrAudioDragItem.self) { items, index in
+          let current = props.directFiles.map(\.id)
+          let ids = items.map(\.id).filter { current.contains($0) }
+          guard !ids.isEmpty else { return }
+          let beforeId = current.indices.contains(index) ? current[index] : nil
+          guard beforeId.map({ !ids.contains($0) }) ?? true else { return }
+          var remaining = current.filter { !ids.contains($0) }
+          let destination = beforeId.flatMap { remaining.firstIndex(of: $0) } ?? remaining.count
+          remaining.insert(contentsOf: ids, at: destination)
+          props.onReorderFiles(["ids": remaining])
+        }
         .onMove(perform: reorderFiles)
       } header: {
         HStack {
@@ -629,10 +644,7 @@ public struct PlayrLibraryView: ExpoSwiftUI.View, ExpoSwiftUI.WithHostingView {
     .accessibilityAddTraits(.isButton)
     .accessibilityHint("Play or pause episode")
     .contextMenu {
-      Button("Add to Queue", systemImage: "text.badge.plus") {
-        props.onAddToQueue(["id": item.id])
-      }
-      .disabled(props.queuedIds.contains(item.id))
+      queueAction(item)
 
       if item.downloadState == "downloaded" && !isRemoving {
         Button("Remove Download", systemImage: "trash", role: .destructive) {
@@ -652,12 +664,8 @@ public struct PlayrLibraryView: ExpoSwiftUI.View, ExpoSwiftUI.WithHostingView {
       }
     }
     .swipeActions(edge: .leading, allowsFullSwipe: true) {
-      Button {
-        props.onAddToQueue(["id": item.id])
-      } label: {
-        Label("Add to Queue", systemImage: "text.badge.plus")
-      }
-      .tint(Color(uiColor: .systemGray))
+      queueAction(item)
+        .tint(props.queuedIds.contains(item.id) ? .orange : .blue)
     }
     .swipeActions(edge: .trailing, allowsFullSwipe: true) {
       if item.downloadState == "downloaded" && !isRemoving {
@@ -670,6 +678,19 @@ public struct PlayrLibraryView: ExpoSwiftUI.View, ExpoSwiftUI.WithHostingView {
       }
     }
     .id("\(item.id):\(item.downloadState):\(isRemoving)")
+  }
+
+  @ViewBuilder
+  private func queueAction(_ item: PlayrLibraryAudioItemRecord) -> some View {
+    if props.queuedIds.contains(item.id) {
+      Button("Remove from Queue", systemImage: "text.badge.minus") {
+        props.onRemoveFromQueue(["id": item.id])
+      }
+    } else {
+      Button("Add to Queue", systemImage: "text.badge.plus") {
+        props.onAddToQueue(["id": item.id])
+      }
+    }
   }
 
   @ToolbarContentBuilder
@@ -788,106 +809,364 @@ public struct PlayrLibraryView: ExpoSwiftUI.View, ExpoSwiftUI.WithHostingView {
   }
 }
 
+public struct PlayrPlayerStateRecord: Record {
+  @Field var title: String = ""
+  @Field var currentTime: Double = 0
+  @Field var duration: Double = 0
+  @Field var artworkSize: Double = 300
+  @Field var shuffleEnabled: Bool = false
+  @Field var pendingName: String?
+  public init() {}
+}
+
 public final class PlayrQueueViewProps: ExpoSwiftUI.ViewProps {
   @Field var currentFileId: String?
   @Field var isPlaying: Bool = false
+  @Field var embedded: Bool = false
+  @Field var player: PlayrPlayerStateRecord?
+  var onSeek = EventDispatcher()
+  var onSkip = EventDispatcher()
+  var onTogglePlaying = EventDispatcher()
+  var onNext = EventDispatcher()
+  var onPrevious = EventDispatcher()
+  var onCycleRepeat = EventDispatcher()
+  var onToggleShuffle = EventDispatcher()
+  var onCancelPending = EventDispatcher()
+  @Field var repeatMode: String = "off"
   @Field var files: [PlayrLibraryAudioItemRecord] = []
   @Field var continuationFiles: [PlayrLibraryAudioItemRecord] = []
 
   var onOpenFile = EventDispatcher()
   var onOpenContinuation = EventDispatcher()
+  var onAddToQueue = EventDispatcher()
   var onRemoveFromQueue = EventDispatcher()
-  var onReorder = EventDispatcher()
-  var onReorderContinuation = EventDispatcher()
+  @Field var continuationAnchorId: String?
+  var onQueueDrop = EventDispatcher()
+  var onContinuationDrop = EventDispatcher()
   var onClear = EventDispatcher()
 }
 
 public struct PlayrQueueView: ExpoSwiftUI.View, ExpoSwiftUI.WithHostingView {
   @ObservedObject public var props: PlayrQueueViewProps
-  @State private var editMode: EditMode = .inactive
 
   public init(props: PlayrQueueViewProps) { self.props = props }
 
   public var body: some View {
-    NavigationStack {
-      queueList
-        .listStyle(.plain)
-        .scrollContentBackground(.hidden)
-        .background(Color(uiColor: .systemBackground))
-        .safeAreaInset(edge: .bottom) {
-          if props.currentFileId != nil { Color.clear.frame(height: 90) }
+    Group {
+      if props.embedded {
+        queueList
+      } else {
+        NavigationStack {
+          queueList
+            .safeAreaInset(edge: .bottom) {
+              if props.currentFileId != nil { Color.clear.frame(height: 90) }
+            }
+            .navigationTitle("Queue")
+            .navigationBarTitleDisplayMode(.large)
         }
-        .navigationTitle("Queue")
-        .navigationBarTitleDisplayMode(.large)
-        .toolbar {
-          ToolbarItem(placement: .topBarTrailing) {
-            Menu {
-              if !props.files.isEmpty {
-                Button("Clear Queue", systemImage: "trash", role: .destructive) { props.onClear() }
-              }
-              EditButton()
-            } label: { Image(systemName: "ellipsis") }
-            .accessibilityLabel("Queue actions")
-          }
-        }
-        .environment(\.editMode, $editMode)
-        .tint(.primary)
+      }
+    }
+    .tint(.primary)
+  }
+
+  private enum QueueRow: Identifiable {
+    case queueHeader, emptyQueue, libraryHeader, libraryFooter, repeatNotice
+    case episode(PlayrLibraryAudioItemRecord, queued: Bool)
+
+    var id: String {
+      switch self {
+      case .queueHeader: return "queue-header"
+      case .emptyQueue: return "empty-queue"
+      case .libraryHeader: return "library-header"
+      case .libraryFooter: return "library-footer"
+      case .repeatNotice: return "repeat-notice"
+      case .episode(let item, let queued): return "\(queued ? "queue" : "library"):\(item.id)"
+      }
     }
   }
 
+  // One movable collection lets native List dragging cross the section headings.
+  // moveDisabled on a heading would block crossing it; ignore heading moves instead.
   private var queueList: some View {
-    List {
-      if props.files.isEmpty && props.continuationFiles.isEmpty {
-        VStack(spacing: 10) {
-          Text("Nothing up next").font(.headline)
-          Text("Play from your library or add episodes to the queue.").foregroundStyle(.secondary)
-        }.padding(.vertical, 36).frame(maxWidth: .infinity)
+    let rows: [QueueRow] = [.queueHeader]
+      + (props.repeatMode == "one" ? [.repeatNotice] : [])
+      + (props.files.isEmpty ? [.emptyQueue] : props.files.map { .episode($0, queued: true) })
+      + (props.continuationFiles.isEmpty && props.continuationAnchorId == nil ? [] : [.libraryHeader]
+          + props.continuationFiles.map { .episode($0, queued: false) } + [.libraryFooter])
+    return List {
+      if props.embedded, let player = props.player {
+        PlayrPlayerControls(props: props, player: player)
+          .listRowInsets(EdgeInsets())
+          .listRowSeparator(.hidden)
       }
-      if !props.files.isEmpty {
-        Section("Next in Queue") { rows(props.files, queued: true) }
+      ForEach(rows) { row in
+        switch row {
+        case .queueHeader:
+          HStack {
+            Text("Next in Queue").font(.headline)
+            Spacer()
+            if !props.files.isEmpty {
+              Menu {
+                Button("Clear Queue", systemImage: "text.badge.minus") { props.onClear() }
+              } label: { Image(systemName: "ellipsis").frame(width: 32, height: 32) }
+                .accessibilityLabel("Queue actions")
+            }
+          }
+          .padding(.top, 12)
+          .accessibilityAddTraits(.isHeader)
+          .listRowSeparator(.hidden)
+        case .emptyQueue:
+          Text("Drag episodes here, or swipe right on an episode to add it.")
+            .font(.subheadline).foregroundStyle(.secondary)
+            .frame(maxWidth: .infinity, minHeight: 60, alignment: .leading)
+            .listRowSeparator(.hidden)
+        case .libraryHeader:
+          Text("Next from Library").font(.headline)
+            .padding(.top, 20)
+            .accessibilityAddTraits(.isHeader)
+            .listRowSeparator(.hidden)
+        case .libraryFooter:
+          Text(props.continuationFiles.isEmpty ? "Drag episodes here to continue from the library." : props.repeatMode == "all"
+            ? "The library order repeats after these episodes."
+            : "Continues in library playback order after your queue.")
+            .font(.footnote).foregroundStyle(.secondary)
+            .listRowSeparator(.hidden)
+        case .repeatNotice:
+          Text("Repeat One is on. Up next plays when you skip or turn repeat off.")
+            .font(.subheadline).foregroundStyle(.secondary)
+            .listRowSeparator(.hidden)
+        case .episode(let item, let queued):
+          queueRow(item, queued: queued)
+        }
       }
-      if !props.continuationFiles.isEmpty {
-        Section("Next from Library") { rows(props.continuationFiles, queued: false) }
+      .onMove { offsets, destination in
+        let items = offsets.compactMap { index -> PlayrAudioDragItem? in
+          guard case .episode(let item, let queued) = rows[index] else { return nil }
+          return PlayrAudioDragItem(id: item.id, origin: queued ? .queue : .continuation)
+        }
+        let target = rows.indices.contains(destination) ? rows[destination] : .libraryFooter
+        switch target {
+        case .episode(let item, let queued):
+          _ = sendDrop(items, beforeId: item.id, queued: queued)
+        case .queueHeader, .repeatNotice, .emptyQueue:
+          _ = sendDrop(items, beforeId: props.files.first?.id, queued: true)
+        case .libraryHeader:
+          _ = sendDrop(items, beforeId: nil, queued: true)
+        case .libraryFooter:
+          _ = sendDrop(items, beforeId: nil, queued: props.continuationFiles.isEmpty && props.continuationAnchorId == nil)
+        }
       }
     }
-  }
-
-  private func rows(_ items: [PlayrLibraryAudioItemRecord], queued: Bool) -> some View {
-    ForEach(items, id: \.id) { item in queueRow(item, queued: queued) }
-      .onMove { offsets, destination in
-        var ids = items.map(\.id)
-        ids.move(fromOffsets: offsets, toOffset: destination)
-        sendOrder(ids, queued: queued)
-      }
-  }
-
-  private func sendOrder(_ ids: [String], queued: Bool) {
-    if queued { props.onReorder(["ids": ids]) }
-    else { props.onReorderContinuation(["ids": ids]) }
+    .listStyle(.plain)
+    .scrollContentBackground(.hidden)
+    .background(Color(uiColor: .systemBackground))
   }
 
   private func queueRow(_ item: PlayrLibraryAudioItemRecord, queued: Bool) -> some View {
     PlayrEpisodeRow(item: item, isCurrent: false, isPlaying: false, isRemoving: false)
       .contentShape(Rectangle())
       .onTapGesture {
-        guard editMode == .inactive else { return }
         if queued { props.onOpenFile(["id": item.id]) }
         else { props.onOpenContinuation(["id": item.id]) }
       }
       .accessibilityAddTraits(.isButton)
-      .accessibilityHint("Play this episode")
-      .contextMenu {
-        if queued {
-          Button("Remove from Queue", systemImage: "trash", role: .destructive) {
-            props.onRemoveFromQueue(["id": item.id])
+      .accessibilityHint("Play this episode. Touch and hold to drag.")
+      .accessibilityAction(named: "Move up") { moveAccessible(item.id, queued: queued, up: true) }
+      .accessibilityAction(named: "Move down") { moveAccessible(item.id, queued: queued, up: false) }
+      .swipeActions(edge: .leading, allowsFullSwipe: true) {
+        queueAction(item, queued: queued).tint(queued ? .orange : .blue)
+      }
+  }
+
+  private func sendDrop(_ items: [PlayrAudioDragItem], beforeId: String?, queued: Bool) -> Bool {
+    let accepted = queued ? items : items.filter {
+      $0.origin == .queue || ($0.origin == .continuation && $0.id != props.continuationAnchorId)
+    }
+    guard !accepted.isEmpty else { return false }
+    // A drag from a section has one origin. Split mixed multi-item drops so
+    // consumed queue entries cannot be restored as newly added library entries.
+    for fromQueue in [true, false] {
+      let ids = accepted.filter { ($0.origin == .queue) == fromQueue }.map(\.id)
+      guard !ids.isEmpty else { continue }
+      let event: [String: Any] = ["ids": ids, "beforeId": beforeId.map { $0 as Any } ?? NSNull(), "fromQueue": fromQueue]
+      if queued { props.onQueueDrop(event) } else { props.onContinuationDrop(event) }
+    }
+    return true
+  }
+
+  private func moveAccessible(_ id: String, queued: Bool, up: Bool) {
+    let items = queued ? props.files : props.continuationFiles
+    guard let index = items.firstIndex(where: { $0.id == id }),
+          up ? index > 0 : index < items.count - 1 else { return }
+    let target = up ? index - 1 : index + 2
+    let beforeId = items.indices.contains(target) ? items[target].id : nil
+    _ = sendDrop([PlayrAudioDragItem(id: id, origin: queued ? .queue : .continuation)], beforeId: beforeId, queued: queued)
+  }
+
+  @ViewBuilder
+  private func queueAction(_ item: PlayrLibraryAudioItemRecord, queued: Bool) -> some View {
+    if queued || props.files.contains(where: { $0.id == item.id }) {
+      Button("Remove from Queue", systemImage: "text.badge.minus") {
+        props.onRemoveFromQueue(["id": item.id])
+      }
+    } else {
+      Button("Add to Queue", systemImage: "text.badge.plus") {
+        props.onAddToQueue(["id": item.id])
+      }
+    }
+  }
+}
+
+private struct PlayrPlayerControls: View {
+  @ObservedObject var props: PlayrQueueViewProps
+  let player: PlayrPlayerStateRecord
+  @State private var isSeeking = false
+  @State private var draftTime: Double = 0
+  @State private var artworkOffset: CGFloat = 0
+
+  var body: some View {
+    VStack(spacing: 0) {
+      RoundedRectangle(cornerRadius: 26)
+        .fill(Color(uiColor: .secondarySystemFill))
+        .frame(width: player.artworkSize, height: player.artworkSize)
+        .overlay { Image(systemName: "waveform").font(.system(size: 92)).foregroundStyle(.blue) }
+        .offset(x: artworkOffset)
+        .accessibilityLabel("Episode artwork")
+        .accessibilityAction(named: "Next episode") { props.onNext() }
+        .accessibilityAction(named: "Previous episode") { props.onPrevious() }
+        .overlay {
+          PlayrArtworkGesture(offset: $artworkOffset) { next in
+            if next { props.onNext() } else { props.onPrevious() }
           }
         }
+      Text(player.title)
+        .font(.system(size: 22, weight: .bold)).lineLimit(2)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.top, 24).padding(.horizontal, 4)
+      if let name = player.pendingName {
+        HStack(spacing: 8) {
+          ProgressView()
+          Text("Preparing \(name)").lineLimit(1).foregroundStyle(.secondary)
+          Spacer()
+          Button("Cancel") { props.onCancelPending() }.buttonStyle(.borderless)
+        }.padding(.top, 12)
       }
-      .swipeActions(edge: .trailing, allowsFullSwipe: true) {
-        if queued {
-          Button(role: .destructive) { props.onRemoveFromQueue(["id": item.id]) }
-            label: { Label("Remove from Queue", systemImage: "trash") }
+      VStack(spacing: 0) {
+        Slider(value: Binding(
+          get: { min(isSeeking ? draftTime : player.currentTime, max(player.duration, 1)) },
+          set: { draftTime = $0 }
+        ), in: 0...max(player.duration, 1), onEditingChanged: { editing in
+          if editing { draftTime = player.currentTime }
+          isSeeking = editing
+          if !editing { props.onSeek(["seconds": draftTime]) }
+        })
+        .tint(.primary).controlSize(.large).frame(height: 44)
+        .accessibilityLabel("Playback position")
+        HStack {
+          Text(durationText(isSeeking ? draftTime : player.currentTime))
+          Spacer()
+          Text("−" + durationText(max(0, player.duration - (isSeeking ? draftTime : player.currentTime))))
+        }.font(.system(size: 11).monospacedDigit()).foregroundStyle(.secondary)
+      }.padding(.top, 20)
+      HStack(spacing: 32) {
+        control("Back 15 seconds", symbol: "gobackward.15", size: 52) { props.onSkip(["seconds": -15]) }
+        control(props.isPlaying ? "Pause" : "Play", symbol: props.isPlaying ? "pause.fill" : "play.fill", size: 64) {
+          props.onTogglePlaying()
         }
+        control("Forward 30 seconds", symbol: "goforward.30", size: 52) { props.onSkip(["seconds": 30]) }
+      }.padding(.top, 24)
+      HStack(spacing: 28) {
+        VStack(spacing: 5) {
+          control(player.shuffleEnabled ? "Turn shuffle off" : "Turn shuffle on", symbol: "shuffle") { props.onToggleShuffle() }
+          Circle().fill(player.shuffleEnabled ? Color.primary : .clear).frame(width: 3, height: 3)
+        }
+        VStack(spacing: 5) {
+          control(props.repeatMode == "one" ? "Repeat one" : props.repeatMode == "all" ? "Repeat all" : "Repeat off",
+                  symbol: props.repeatMode == "one" ? "repeat.1" : "repeat") { props.onCycleRepeat() }
+          Circle().fill(props.repeatMode == "off" ? .clear : Color.primary).frame(width: 3, height: 3)
+        }
+      }.padding(.top, 20)
+    }
+    .padding(.horizontal, 24).padding(.top, 28).padding(.bottom, 32)
+  }
+
+  private func durationText(_ seconds: Double) -> String {
+    let total = max(0, Int(seconds.isFinite ? seconds : 0))
+    return total >= 3600
+      ? String(format: "%d:%02d:%02d", total / 3600, total / 60 % 60, total % 60)
+      : String(format: "%d:%02d", total / 60, total % 60)
+  }
+
+  private func control(_ label: String, symbol: String, size: CGFloat = 44, action: @escaping () -> Void) -> some View {
+    Button(action: action) {
+      Image(systemName: symbol)
+        .font(.system(size: size >= 50 ? 24 : 19))
+        .frame(width: size, height: size)
+        .modifier(PlayrPlayerControlBackground())
+    }
+    .buttonStyle(.borderless)
+    .accessibilityLabel(label)
+  }
+}
+
+private struct PlayrPlayerControlBackground: ViewModifier {
+  @ViewBuilder
+  func body(content: Content) -> some View {
+    if #available(iOS 26.0, *) {
+      content.glassEffect(.regular.interactive(), in: .circle)
+    } else {
+      content.background(Color(uiColor: .secondarySystemBackground), in: Circle())
+    }
+  }
+}
+
+// Reject vertical movement before recognition so the enclosing List can scroll.
+// SwiftUI DragGesture in a List claims those touches even with simultaneousGesture.
+private struct PlayrArtworkGesture: UIViewRepresentable {
+  @Binding var offset: CGFloat
+  let onNavigate: (Bool) -> Void
+
+  func makeCoordinator() -> Coordinator { Coordinator(self) }
+
+  func makeUIView(context: Context) -> UIView {
+    let view = UIView()
+    let pan = UIPanGestureRecognizer(target: context.coordinator, action: #selector(Coordinator.pan(_:)))
+    pan.delegate = context.coordinator
+    view.addGestureRecognizer(pan)
+    return view
+  }
+
+  func updateUIView(_ view: UIView, context: Context) { context.coordinator.parent = self }
+
+  final class Coordinator: NSObject, UIGestureRecognizerDelegate {
+    var parent: PlayrArtworkGesture
+    init(_ parent: PlayrArtworkGesture) { self.parent = parent }
+
+    func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer) -> Bool {
+      guard let pan = gestureRecognizer as? UIPanGestureRecognizer else { return false }
+      let velocity = pan.velocity(in: pan.view)
+      return abs(velocity.x) > abs(velocity.y) * 1.5
+    }
+
+    func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer,
+                           shouldRecognizeSimultaneouslyWith otherGestureRecognizer: UIGestureRecognizer) -> Bool {
+      true
+    }
+
+    @objc func pan(_ gesture: UIPanGestureRecognizer) {
+      let translation = gesture.translation(in: gesture.view)
+      switch gesture.state {
+      case .changed:
+        parent.offset = translation.x
+      case .ended:
+        if abs(translation.x) >= 18 && abs(translation.x) > abs(translation.y) * 1.5 {
+          parent.onNavigate(translation.x < 0)
+        }
+        withAnimation(.spring(response: 0.3, dampingFraction: 0.85)) { parent.offset = 0 }
+      case .cancelled, .failed:
+        parent.offset = 0
+      default: break
       }
+    }
   }
 }

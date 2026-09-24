@@ -164,3 +164,26 @@ test('a failure to release the player stops callers from evicting its file', asy
     expect(app.errors).toContain('Native player is busy');
   } finally { player.pause = pause; }
 });
+
+test('returning a queued episode updates both orders and survives later moves', async () => {
+  const { moveItemsBefore } = await import('./queueOrder');
+  const app = await mount({ moveQueueItems: async (ids, beforeId, fromQueue) => {
+    app.setQueue(moveItemsBefore(app.library.getQueueIds(), ids, beforeId, !fromQueue));
+  } });
+  await act(async () => app.get().flow.openLibraryFile(file('A')));
+  await act(async () => app.get().flow.queueContinuation(['B'], null));
+  expect(app.get().flow.continuationIds).toEqual(['C', 'X']);
+  await act(async () => app.get().flow.moveContinuation(['B'], 'C', true));
+  await app.render();
+  expect(app.library.getQueueIds()).toEqual([]);
+  expect(app.get().flow.continuationIds).toEqual(['B', 'C', 'X']);
+  await act(async () => app.get().flow.queueContinuation(['C'], null));
+  await act(async () => app.get().flow.moveContinuation(['X'], 'B', false));
+  await app.render();
+  expect(app.library.getQueueIds()).toEqual(['C']);
+  expect(app.get().flow.continuationIds).toEqual(['X', 'B']);
+  await act(async () => app.get().flow.navigate('next'));
+  expect(app.get().playback.currentFile.id).toBe('C');
+  await act(async () => app.get().flow.navigate('next'));
+  expect(app.get().playback.currentFile.id).toBe('X');
+});

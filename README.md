@@ -36,8 +36,13 @@ The native iCloud module requires a native build. Expo Go cannot load it. Real i
 - Next consumes the explicit queue first, then advances through the library order. Previous ignores consumed queue entries. From a queued episode it returns to the last library position; otherwise it goes backward through the library order.
 - Repeat-all wraps the library order. It does not restore consumed queue entries. Repeat-one replays the current episode on completion without consuming another entry. Manual Next still advances.
 - Shuffle affects the library order, not explicit queued episodes.
-- The Queue tab shows explicit entries and the library continuation. Choose Edit from Queue actions to reorder either section with its move handles, then choose Done. Reordering updates playback. Clear Queue clears explicit pending entries, without stopping the current episode or removing the library continuation.
+- Scroll below the controls in Now Playing to manage the queue. The Queue tab shows the same live order, with explicit entries before automatic library continuation. Repeat One displays a reminder that the current episode will keep playing until you skip or turn repeat off.
+- Touch and hold an episode to drag it. Rearrange either queue section directly, or drag episodes between Next from Library and Next in Queue. Dragging into the queue removes the episode from the remaining session so it does not play twice. Changes to library continuation apply to the current playback session; dragging within a library folder saves that folder's order. Clear Queue clears pending entries without stopping playback or removing library continuation.
+- Swipe right on library episodes to add them to the queue, or remove them if already queued. Swipe right on explicit queue entries to remove them. Library continuation rows also offer queue actions. These actions never remove an audio file. The separate Remove Download action in the library still evicts only the downloaded copy.
+- When Remember Timestamps is enabled for an episode's folder, Continue Listening and library rows show its saved position and remaining time.
 - Cancel stops a pending playback request. An iCloud transfer already requested can continue. Prefetch never starts playback by itself.
+
+The app icon is generated from `scripts/generate-icon.swift`. Run `swift scripts/generate-icon.swift` to update `assets/icon.png`, then regenerate the native project before building.
 
 ## Verification
 
