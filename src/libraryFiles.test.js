@@ -45,3 +45,11 @@ describe('replaceVerifiedFiles', () => {
     expect(replaceVerifiedFiles([downloaded], [lockedFallback])).toEqual([downloaded]);
   });
 });
+
+test('an incomplete scan preserves absent downloaded files and unchanged verification preserves identity', () => {
+  const original = { id: 'one', metadataAvailable: true, downloadState: 'downloaded', localUri: 'file://one' };
+  const current = [original];
+  expect(mergeListedFiles(current, [], false)).toEqual(current);
+  expect(mergeListedFiles(current, [], true)).toEqual([]);
+  expect(replaceVerifiedFiles(current, [{ ...original }])).toBe(current);
+});

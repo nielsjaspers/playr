@@ -102,10 +102,11 @@ export default function PlayrApp() {
 
   const removeFileDownloads = useCallback(
     async (ids: string[]) => {
+      if (flow.pending && ids.includes(flow.pending.id)) flow.cancelPending();
       if (playback.currentFile && ids.includes(playback.currentFile.id)) await flow.stop();
       await library.removeDownloads(ids);
     },
-    [library.removeDownloads, playback.currentFile, flow.stop],
+    [library.removeDownloads, playback.currentFile, flow.stop, flow.pending, flow.cancelPending],
   );
 
   const createFolder = useCallback(
@@ -140,8 +141,9 @@ export default function PlayrApp() {
         {
           text: 'Rename',
           onPress: (name?: string) => {
-            if (!name?.trim()) return;
-            void (async () => {
+            if (!name?.trim() || name.trim() === folder.name) return;
+            flow.cancelPending();
+            report((async () => {
               if (
                 playback.currentFile &&
                 (playback.currentFile.relativePath === currentFolderPath ||
@@ -150,15 +152,16 @@ export default function PlayrApp() {
                 await flow.stop();
               }
               const renamedFolder = await library.renameFolder(currentFolderPath, name);
+              flow.remapPath(currentFolderPath, renamedFolder.relativePath);
               setCurrentFolderPath(renamedFolder.relativePath);
-            })().catch(() => undefined);
+            })());
           },
         },
       ],
       'plain-text',
       folder.name,
     );
-  }, [currentFolderPath, library.folders, library.renameFolder, playback.currentFile, flow.stop]);
+  }, [currentFolderPath, library.folders, library.renameFolder, playback.currentFile, flow.stop, flow.cancelPending, flow.remapPath, report]);
 
   const miniPlayerPanResponder = useMemo(
     () =>
@@ -262,7 +265,27 @@ export default function PlayrApp() {
     );
   };
 
-  const renderLibraryScreen = () => {
+  const nativeItem = useCallback((
+      file: ICloudAudioFile,
+      contextLabel: string | null = null,
+    ): PlayrLibraryAudioItem => {
+      const progress = library.progressById.get(file.id);
+      return {
+        id: file.id,
+        name: file.name,
+        relativePath: file.relativePath,
+        size: file.size,
+        downloadState: file.downloadState,
+        downloadProgress: file.downloadProgress,
+        progressPosition: progress?.position ?? null,
+        progressDuration: progress?.duration ?? null,
+        completedAt: progress?.completedAt ?? null,
+        contextLabel,
+      };
+    }, [library.progressById]);
+
+  const filesById = useMemo(() => new Map(library.files.map((file) => [file.id, file])), [library.files]);
+  const libraryScreen = useMemo(() => {
     const currentFolder = library.folders.find(
       (folder) => folder.relativePath === currentFolderPath,
     );
@@ -293,28 +316,33 @@ export default function PlayrApp() {
       searchGlobally,
     );
 
-    const nativeItem = (
-      file: ICloudAudioFile,
-      contextLabel: string | null = null,
-    ): PlayrLibraryAudioItem => {
-      const progress = library.progressById.get(file.id);
-      return {
-        id: file.id,
-        name: file.name,
-        relativePath: file.relativePath,
-        size: file.size,
-        downloadState: file.downloadState,
-        downloadProgress: file.downloadProgress,
-        progressPosition: progress?.position ?? null,
-        progressDuration: progress?.duration ?? null,
-        completedAt: progress?.completedAt ?? null,
-        contextLabel,
-      };
+    return { currentFolder, isReversed, directFiles, childFolders, currentFolderPreferences,
+      nativeDirectFiles: directFiles.map((file) => nativeItem(file)),
+      nativeContinueFiles: continueListeningFiles.map((file) => nativeItem(file, parentFolderPath(file.relativePath) || 'Library')),
+      nativeSearchResults: searchResults.map((file) => nativeItem(file, parentFolderPath(file.relativePath) || 'Library')),
+      hasCloudFiles: directFiles.some((file) => file.downloadState === 'inCloud'),
+      hasDownloadedFiles: directFiles.some((file) => file.downloadState === 'downloaded'),
     };
+  }, [library.files, library.folders, library.orderByFolder, library.reversedFolderPaths,
+      library.folderPreferencesByPath, library.progressById, currentFolderPath, searchQuery, searchGlobally, nativeItem]);
+  const queueScreen = useMemo(() => {
+    const items = (ids: string[]) => ids.flatMap((id) => {
+      const file = filesById.get(id);
+      return file ? [nativeItem(file, parentFolderPath(file.relativePath) || 'Library')] : [];
+    });
+    return { nativeQueueFiles: items(library.queueIds), continuationFiles: items(flow.continuationIds) };
+  }, [filesById, nativeItem, library.queueIds, flow.continuationIds]);
+  const removingIds = useMemo(() => [...library.removingIds], [library.removingIds]);
 
+  const renderLibraryScreen = () => {
+    const { currentFolder, isReversed, directFiles, childFolders, currentFolderPreferences } = libraryScreen;
     const moveFiles = async (ids: string[], destinationFolderPath: string) => {
+      flow.cancelPending();
       if (playback.currentFile && ids.includes(playback.currentFile.id)) await flow.stop();
-      for (const id of ids) await library.moveFile(id, destinationFolderPath);
+      for (const id of ids) {
+        const moved = await library.moveFile(id, destinationFolderPath);
+        flow.remapPath(id, moved.id);
+      }
     };
 
     return (
@@ -333,24 +361,21 @@ export default function PlayrApp() {
           <ActivityIndicator color={palette.secondaryLabel} style={styles.loading} />
         ) : (
           <PlayrLibraryView
-            continueFiles={continueListeningFiles.map((file) =>
-              nativeItem(file, parentFolderPath(file.relativePath) || 'Library'),
-            )}
+            documentsUri={library.documentsUri}
+            continueFiles={libraryScreen.nativeContinueFiles}
             currentFileId={playback.currentFile?.id ?? null}
             currentFolderPath={currentFolderPath}
-            directFiles={directFiles.map((file) => nativeItem(file))}
+            directFiles={libraryScreen.nativeDirectFiles}
             folders={childFolders}
-            hasCloudFiles={directFiles.some((file) => file.downloadState === 'inCloud')}
-            hasDownloadedFiles={directFiles.some(
-              (file) => file.downloadState === 'downloaded',
-            )}
+            hasCloudFiles={libraryScreen.hasCloudFiles}
+            hasDownloadedFiles={libraryScreen.hasDownloadedFiles}
             keepDownloads={currentFolderPreferences.keepDownloads}
             rememberTimestamps={currentFolderPreferences.rememberTimestamps}
             isPlaying={playback.status.playing}
             isRefreshing={library.isRefreshing}
             isReversed={isReversed}
             onAddToQueue={({ nativeEvent }) => {
-              const file = library.files.find((item) => item.id === nativeEvent.id);
+              const file = filesById.get(nativeEvent.id);
               if (file) report(addFileToQueue(file));
             }}
             onBack={() => {
@@ -361,7 +386,7 @@ export default function PlayrApp() {
             onCreateFolder={() => createFolder(currentFolderPath)}
             onDownloadFiles={({ nativeEvent }) => {
               const ids = nativeEvent.ids.filter(
-                (id) => library.files.find((file) => file.id === id)?.downloadState === 'inCloud',
+                (id) => filesById.get(id)?.downloadState === 'inCloud',
               );
               if (ids.length > 0) void library.download(ids);
             }}
@@ -380,7 +405,7 @@ export default function PlayrApp() {
               report(library.setFolderKeepDownloads(currentFolderPath, nativeEvent.enabled));
             }}
             onOpenFile={({ nativeEvent }) => {
-              const file = library.files.find((item) => item.id === nativeEvent.id);
+              const file = filesById.get(nativeEvent.id);
               if (file) flow.openLibraryFile(file);
             }}
             onOpenFolder={({ nativeEvent }) => {
@@ -401,7 +426,7 @@ export default function PlayrApp() {
             }}
             onRemoveDownloads={({ nativeEvent }) => {
               const ids = nativeEvent.ids.filter(
-                (id) => library.files.find((file) => file.id === id)?.downloadState === 'downloaded',
+                (id) => filesById.get(id)?.downloadState === 'downloaded',
               );
               if (ids.length > 0) report(removeFileDownloads(ids));
             }}
@@ -413,12 +438,10 @@ export default function PlayrApp() {
             onSearchScopeChange={({ nativeEvent }) => setSearchGlobally(nativeEvent.global)}
             onToggleOrder={() => report(library.toggleFolderOrder(currentFolderPath))}
             queuedIds={library.queueIds}
-            removingIds={[...library.removingIds]}
+            removingIds={removingIds}
             searchGlobally={searchGlobally}
             searchQuery={searchQuery}
-            searchResults={searchResults.map((file) =>
-              nativeItem(file, parentFolderPath(file.relativePath) || 'Library'),
-            )}
+            searchResults={libraryScreen.nativeSearchResults}
             style={styles.nativeLibraryView}
             title={currentFolder?.name ?? 'Library'}
           />
@@ -429,35 +452,7 @@ export default function PlayrApp() {
   };
 
   const renderQueueScreen = () => {
-    const queueFiles = library.queueIds
-      .map((id) => library.files.find((file) => file.id === id))
-      .filter((file): file is ICloudAudioFile => file != null);
-
-    const nativeQueueFiles: PlayrLibraryAudioItem[] = queueFiles.map((file) => {
-      const progress = library.progressById.get(file.id);
-      return {
-        id: file.id,
-        name: file.name,
-        relativePath: file.relativePath,
-        size: file.size,
-        downloadState: file.downloadState,
-        downloadProgress: file.downloadProgress,
-        progressPosition: progress?.position ?? null,
-        progressDuration: progress?.duration ?? null,
-        completedAt: progress?.completedAt ?? null,
-        contextLabel: parentFolderPath(file.relativePath) || 'Library',
-      };
-    });
-
-    const continuationFiles = flow.continuationIds.flatMap((id) => {
-      const file = library.files.find((item) => item.id === id);
-      if (!file) return [];
-      const progress = library.progressById.get(id);
-      return [{ id, name: file.name, relativePath: file.relativePath, size: file.size,
-        downloadState: file.downloadState, downloadProgress: file.downloadProgress,
-        progressPosition: progress?.position ?? null, progressDuration: progress?.duration ?? null,
-        completedAt: progress?.completedAt ?? null, contextLabel: null }];
-    });
+    const { nativeQueueFiles, continuationFiles } = queueScreen;
     return (
       <View style={[styles.safeArea, { backgroundColor: palette.background }]}>
         {library.availability !== 'available' ? (

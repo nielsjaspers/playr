@@ -10,7 +10,7 @@ describe('removeDownloadsWithLockRetry', () => {
       calls.push(ids);
       if (calls.length < 3) {
         return [
-          { id: 'playing', succeeded: false, error: 'The file couldn\'t be locked.' },
+          { id: 'playing', succeeded: false, error: 'Het bestand is vergrendeld.', retryable: true },
           ...(calls.length === 1
             ? [{ id: 'other', succeeded: true, error: null }]
             : []),
@@ -58,7 +58,7 @@ describe('removeDownloadsWithLockRetry', () => {
 
 describe('formatRemovalFailure', () => {
   test('turns the raw file-lock error into useful copy', () => {
-    expect(formatRemovalFailure('The file couldn\'t be locked.')).toBe(
+    expect(formatRemovalFailure({ error: 'Het bestand is vergrendeld.', retryable: true })).toBe(
       'Close the file in Files, then try again. The audio file is still downloaded.',
     );
   });

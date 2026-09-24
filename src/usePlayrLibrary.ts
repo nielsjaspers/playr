@@ -6,6 +6,7 @@ import PlayrICloud, {
   type ICloudAvailability,
   type ICloudFolder,
 } from '../modules/playr-icloud';
+import { createLibraryRefresh } from './libraryRefresh';
 import { createFilePreparation } from './filePreparation';
 import { mergeListedFiles, replaceVerifiedFiles } from './libraryFiles';
 import {
@@ -73,6 +74,11 @@ export function usePlayrLibrary() {
   const orderRef = useRef(orderByFolder);
   const folderPreferencesRef = useRef(folderPreferencesByPath);
   const hasInitialized = useRef(false);
+  const scans = useRef(createLibraryRefresh());
+  const activeRefresh = useRef(0);
+  const protectedIds = useRef(new Set<string>());
+  const [documentsUri, setDocumentsUri] = useState<string | null>(null);
+  const protectDownloads = useCallback((ids: string[]) => { protectedIds.current = new Set(ids); }, []);
 
   useEffect(() => {
     filesRef.current = files;
@@ -120,6 +126,7 @@ export function usePlayrLibrary() {
       const removableIds = currentFiles
         .filter(
           (file) =>
+            !protectedIds.current.has(file.id) &&
             overdueSet.has(file.id) &&
             !folderPreferencesRef.current.get(parentFolderPath(file.relativePath))?.keepDownloads &&
             file.downloadState === 'downloaded' &&
@@ -143,31 +150,51 @@ export function usePlayrLibrary() {
     [],
   );
 
-  const refresh = useCallback(async () => {
+  const refresh = useCallback(() => scans.current.run(async (isCurrent) => {
+    const request = ++activeRefresh.current;
     setIsRefreshing(true);
     try {
       const nextAvailability = await PlayrICloud.getAvailabilityAsync();
+      if (!isCurrent()) return;
       setAvailability(nextAvailability);
-      if (nextAvailability !== 'available') return;
-
+      if (nextAvailability !== 'available') { setDocumentsUri(null); return; }
       await PlayrICloud.ensureLibraryAsync();
-      const [nativeFiles, nextFolders] = await Promise.all([
-        PlayrICloud.listAudioFilesAsync(),
-        PlayrICloud.listFoldersAsync(),
-      ]);
-      const listedFiles = mergeListedFiles(filesRef.current, nativeFiles);
+      if (!isCurrent()) return;
+      const snapshot = await PlayrICloud.scanLibraryAsync();
+      if (!isCurrent()) return;
+      const listedFiles = mergeListedFiles(filesRef.current, snapshot.files, snapshot.complete);
       const cleanedFiles = await removeOverdueDownloads(listedFiles);
+      if (!isCurrent()) return;
+      setDocumentsUri(snapshot.documentsUri);
+      const nextFolders = snapshot.complete ? snapshot.folders : [...new Map([
+        ...foldersRef.current.map((folder) => [folder.id, folder] as const),
+        ...snapshot.folders.map((folder) => [folder.id, folder] as const),
+      ]).values()];
       applyFiles(cleanedFiles);
       await replaceLibraryCache(cleanedFiles);
-      await applyOrganization(cleanedFiles, nextFolders);
-      setError(null);
+      if (!isCurrent()) return;
+      // Incomplete scans cannot prove deletion, so leave persisted ordering intact.
+      if (snapshot.complete) await applyOrganization(cleanedFiles, nextFolders);
+      else { foldersRef.current = nextFolders; setFolders(nextFolders); }
+      if (snapshot.complete && isCurrent()) {
+        const availableIds = new Set(cleanedFiles.map((file) => file.id));
+        const remainingQueue = queueRef.current.filter((id) => availableIds.has(id));
+        if (remainingQueue.length !== queueRef.current.length) {
+          queueRef.current = remainingQueue;
+          setQueueIds(remainingQueue);
+          await replaceQueue(remainingQueue);
+        }
+      }
+      if (isCurrent()) setError(null);
     } catch (caughtError) {
-      setError(caughtError instanceof Error ? caughtError.message : 'The library could not refresh.');
+      if (isCurrent()) setError(caughtError instanceof Error ? caughtError.message : 'The library could not refresh.');
     } finally {
-      setIsRefreshing(false);
-      setIsLoading(false);
+      if (request === activeRefresh.current) {
+        setIsRefreshing(false);
+        setIsLoading(false);
+      }
     }
-  }, [applyFiles, applyOrganization, removeOverdueDownloads]);
+  }), [applyFiles, applyOrganization, removeOverdueDownloads]);
 
   useEffect(() => {
     let isMounted = true;
@@ -215,6 +242,7 @@ export function usePlayrLibrary() {
 
     return () => {
       isMounted = false;
+      scans.current.invalidate();
     };
   }, [applyFiles, refresh]);
 
@@ -234,10 +262,11 @@ export function usePlayrLibrary() {
     if (!verifiedFile) return null;
     const nextFiles = replaceVerifiedFiles(filesRef.current, [verifiedFile]);
     if (nextFiles !== filesRef.current) {
+      scans.current.invalidate();
       applyFiles(nextFiles);
       await upsertLibraryFiles([verifiedFile]);
     }
-    return verifiedFile.metadataAvailable ? verifiedFile : filesRef.current.find((file) => file.id === id) ?? verifiedFile;
+    return verifiedFile;
   }, [applyFiles]);
 
   const preparationRef = useRef<ReturnType<typeof createFilePreparation> | null>(null);
@@ -246,6 +275,7 @@ export function usePlayrLibrary() {
     request: async (id) => {
       const [result] = await PlayrICloud.requestDownloadsAsync([id]);
       if (!result?.succeeded) throw new Error(result?.error ?? 'The download could not start.');
+      scans.current.invalidate();
       applyFiles(filesRef.current.map((file) => file.id === id ? { ...file, downloadState: 'downloading' } : file));
     },
   });
@@ -261,6 +291,7 @@ export function usePlayrLibrary() {
   }, [prepareFile]);
 
   const removeDownloads = useCallback(async (ids: string[]) => {
+    scans.current.invalidate();
     setError(null);
     setRemovingIds(new Set(ids));
     try {
@@ -269,12 +300,13 @@ export function usePlayrLibrary() {
         (retryIds) => PlayrICloud.removeDownloadsAsync(retryIds),
       );
       const verifiedFiles = await PlayrICloud.getAudioFilesAsync(ids);
+      scans.current.invalidate();
       const nextFiles = replaceVerifiedFiles(filesRef.current, verifiedFiles);
       applyFiles(nextFiles);
       await replaceLibraryCache(nextFiles);
 
       const failure = results.find((result) => !result.succeeded);
-      if (failure) setError(formatRemovalFailure(failure.error));
+      if (failure) setError(formatRemovalFailure(failure));
       return verifiedFiles
         .filter(
           (file) => file.metadataAvailable !== false && file.downloadState === 'inCloud',
@@ -293,9 +325,11 @@ export function usePlayrLibrary() {
   }, [applyFiles]);
 
   const createFolder = useCallback(async (parentPath: string, name: string) => {
+    scans.current.invalidate();
     setError(null);
     try {
       const folder = await PlayrICloud.createFolderAsync(parentPath, name);
+      scans.current.invalidate();
       const nextFolders = [...foldersRef.current, folder];
       await applyOrganization(filesRef.current, nextFolders);
       return folder;
@@ -307,9 +341,11 @@ export function usePlayrLibrary() {
   }, [applyOrganization]);
 
   const renameFolder = useCallback(async (relativePath: string, name: string) => {
+    scans.current.invalidate();
     setError(null);
     try {
       const renamedFolder = await PlayrICloud.renameFolderAsync(relativePath, name);
+      scans.current.invalidate();
       if (renamedFolder.relativePath === relativePath) return renamedFolder;
       await remapFolderPathPrefix(relativePath, renamedFolder.relativePath);
       const remappedOrder = remapLibraryOrderPaths(
@@ -351,9 +387,11 @@ export function usePlayrLibrary() {
   }, [refresh]);
 
   const moveFile = useCallback(async (id: string, destinationFolderPath: string) => {
+    scans.current.invalidate();
     setError(null);
     try {
       const movedFile = await PlayrICloud.moveAudioFileAsync(id, destinationFolderPath);
+      scans.current.invalidate();
       await remapPlaybackFileId(id, movedFile.id);
       setProgressById((current) => {
         const progress = current.get(id);
@@ -418,6 +456,7 @@ export function usePlayrLibrary() {
   }, []);
 
   const reorderFiles = useCallback(async (parentPath: string, displayedFileIds: string[]) => {
+    scans.current.invalidate();
     const nextOrder = reorderFolderFiles(
       orderRef.current,
       parentPath,
@@ -472,6 +511,8 @@ export function usePlayrLibrary() {
     progressById,
     queueIds,
     availability,
+    documentsUri,
+    protectDownloads,
     isLoading,
     isRefreshing,
     error,

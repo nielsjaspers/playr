@@ -28,6 +28,7 @@ type BooleanEvent = NativeSyntheticEvent<{ enabled: boolean }>;
 export type PlayrLibraryViewProps = {
   style?: StyleProp<ViewStyle>;
   title: string;
+  documentsUri: string | null;
   currentFolderPath: string;
   searchQuery: string;
   searchGlobally: boolean;

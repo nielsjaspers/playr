@@ -4,6 +4,7 @@ import type {
   ICloudAudioFile,
   ICloudAvailability,
   ICloudFileOperationResult,
+  ICloudLibrarySnapshot,
 } from './PlayrICloud.types';
 
 // PlayrICloudModule is not available on the web platform.
@@ -16,8 +17,8 @@ class PlayrICloudModule extends NativeModule<{}> {
     throw new Error('The Playr iCloud library is only available on iOS.');
   }
 
-  async listAudioFilesAsync(): Promise<ICloudAudioFile[]> {
-    return [];
+  async scanLibraryAsync(): Promise<ICloudLibrarySnapshot> {
+    return { files: [], folders: [], complete: false, documentsUri: '' };
   }
 
   async getAudioFilesAsync(_ids: string[]): Promise<ICloudAudioFile[]> {

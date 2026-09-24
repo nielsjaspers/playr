@@ -12,7 +12,6 @@ type RetryOptions = {
   onRetry?: (update: RetryUpdate) => void;
 };
 
-const LOCK_ERROR = /\block(?:ed|ing)?\b/i;
 const LOCK_RETRY_DELAYS_MS = [250, 750, 1_500];
 
 function wait(milliseconds: number) {
@@ -20,7 +19,7 @@ function wait(milliseconds: number) {
 }
 
 function isFileLockFailure(result: ICloudFileOperationResult) {
-  return !result.succeeded && result.error != null && LOCK_ERROR.test(result.error);
+  return !result.succeeded && result.retryable;
 }
 
 export async function removeDownloadsWithLockRetry(
@@ -49,9 +48,9 @@ export async function removeDownloadsWithLockRetry(
   return results;
 }
 
-export function formatRemovalFailure(error: string | null) {
-  if (error && LOCK_ERROR.test(error)) {
+export function formatRemovalFailure(result: ICloudFileOperationResult) {
+  if (result.retryable) {
     return 'Close the file in Files, then try again. The audio file is still downloaded.';
   }
-  return error ?? 'A local download could not be removed.';
+  return result.error ?? 'A local download could not be removed.';
 }

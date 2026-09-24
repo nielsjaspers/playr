@@ -27,6 +27,10 @@ export function usePlaybackFlow(library: Library, playback: Playback, onError: (
   libraryRef.current = library;
   playbackRef.current = playback;
 
+  useEffect(() => {
+    library.protectDownloads([playback.currentFile?.id, pending?.id].filter((id): id is string => id != null));
+  }, [library.protectDownloads, playback.currentFile?.id, pending?.id]);
+
   const updateSession = useCallback((next: PlaybackSession) => {
     sessionRef.current = next;
     setSession(next);
@@ -145,7 +149,12 @@ export function usePlaybackFlow(library: Library, playback: Playback, onError: (
   const navigate = useCallback(async (direction: 'next' | 'previous' | 'finished') => {
     if (direction === 'finished' && pendingRef.current) return false;
     const currentId = playbackRef.current.currentFile?.id ?? null;
-    const target = getPlaybackTarget(sessionRef.current, libraryRef.current.getQueueIds(), currentId, direction, repeatRef.current);
+    const current = sessionRef.current;
+    const available = new Set(libraryRef.current.files.map((file) => file.id));
+    const navigable = { ...current, sequence: current.sequence == null ? null : { ...current.sequence,
+      playOrderIds: current.sequence.playOrderIds.filter((id) => id === current.libraryFileId || available.has(id)),
+    } };
+    const target = getPlaybackTarget(navigable, libraryRef.current.getQueueIds().filter((id) => available.has(id)), currentId, direction, repeatRef.current);
     if (!target) { cancelPending(); return false; }
     if (direction === 'finished' && repeatRef.current === 'one') {
       await playbackRef.current.replay();
@@ -179,6 +188,21 @@ export function usePlaybackFlow(library: Library, playback: Playback, onError: (
     setRepeatMode(repeatRef.current);
   }, []);
 
+  const remapPath = useCallback((oldPath: string, newPath: string) => {
+    cancelPending();
+    const remap = (path: string) => path === oldPath || path.startsWith(`${oldPath}/`)
+      ? `${newPath}${path.slice(oldPath.length)}` : path;
+    const current = sessionRef.current;
+    updateSession({ ...current,
+      libraryFileId: current.libraryFileId == null ? null : remap(current.libraryFileId),
+      sequence: current.sequence == null ? null : {
+        sourcePath: remap(current.sequence.sourcePath),
+        baseIds: current.sequence.baseIds.map(remap),
+        playOrderIds: current.sequence.playOrderIds.map(remap),
+      },
+    });
+  }, [cancelPending, updateSession]);
+
   const continuationIds = useMemo(() => getLibraryContinuation(session, repeatMode), [session, repeatMode]);
   const reorderContinuation = useCallback((ids: string[]) => {
     const current = sessionRef.current;
@@ -208,6 +232,6 @@ export function usePlaybackFlow(library: Library, playback: Playback, onError: (
     openLibraryFile, playFolder, navigate, toggle, stop, cancelPending, toggleShuffle, advanceRepeatMode,
     openQueueFile: (id: string) => select({ id, source: 'queue' }),
     openContinuation: (id: string) => select({ id, source: 'library' }),
-    reorderContinuation,
+    reorderContinuation, remapPath,
   };
 }

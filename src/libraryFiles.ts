@@ -4,6 +4,7 @@ import type { ICloudAudioFile } from '../modules/playr-icloud';
 export function mergeListedFiles(
   currentFiles: ICloudAudioFile[],
   listedFiles: ICloudAudioFile[],
+  complete = true,
 ) {
   const currentById = new Map(currentFiles.map((file) => [file.id, file]));
   const listedIds = new Set(listedFiles.map((file) => file.id));
@@ -11,7 +12,7 @@ export function mergeListedFiles(
     file.metadataAvailable === false ? currentById.get(file.id) ?? file : file,
   );
   const transitioningFiles = currentFiles.filter(
-    (file) => file.downloadState === 'downloading' && !listedIds.has(file.id),
+    (file) => (!complete || file.downloadState === 'downloading') && !listedIds.has(file.id),
   );
   return [...mergedFiles, ...transitioningFiles];
 }

@@ -71,9 +71,12 @@ export function remapLibraryOrderPaths(
   );
 }
 
-function orderIndex(order: string[], key: string) {
-  const index = order.indexOf(key);
-  return index < 0 ? Number.MAX_SAFE_INTEGER : index;
+function orderRanks(order: string[]) {
+  const ranks = new Map<string, number>();
+  for (const [index, key] of order.entries()) {
+    if (!ranks.has(key)) ranks.set(key, index);
+  }
+  return ranks;
 }
 
 export function orderFiles(
@@ -82,10 +85,10 @@ export function orderFiles(
   order: LibraryOrder,
   reversed: boolean,
 ) {
-  const storedOrder = order.get(parentPath) ?? [];
+  const ranks = orderRanks(order.get(parentPath) ?? []);
   const ordered = [...files].sort(
     (left, right) =>
-      orderIndex(storedOrder, fileOrderKey(left)) - orderIndex(storedOrder, fileOrderKey(right)),
+      (ranks.get(fileOrderKey(left)) ?? Number.MAX_SAFE_INTEGER) - (ranks.get(fileOrderKey(right)) ?? Number.MAX_SAFE_INTEGER),
   );
   return reversed ? ordered.reverse() : ordered;
 }
@@ -96,10 +99,10 @@ export function orderFolders(
   order: LibraryOrder,
   reversed: boolean,
 ) {
-  const storedOrder = order.get(parentPath) ?? [];
+  const ranks = orderRanks(order.get(parentPath) ?? []);
   const ordered = [...folders].sort(
     (left, right) =>
-      orderIndex(storedOrder, folderOrderKey(left)) - orderIndex(storedOrder, folderOrderKey(right)),
+      (ranks.get(folderOrderKey(left)) ?? Number.MAX_SAFE_INTEGER) - (ranks.get(folderOrderKey(right)) ?? Number.MAX_SAFE_INTEGER),
   );
   return reversed ? ordered.reverse() : ordered;
 }

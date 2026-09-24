@@ -44,7 +44,7 @@ async function mount(overrides = {}) {
     orderByFolder: new Map(), reversedFolderPaths: new Set(), autoDownloadOnTap: true,
     getQueueIds: () => queue,
     removeFromQueue: async (id) => { queue = queue.filter((item) => item !== id); },
-    updateProgress: async () => {}, verifyFile: async (id) => files.find((file) => file.id === id),
+    protectDownloads: () => {}, updateProgress: async () => {}, verifyFile: async (id) => files.find((file) => file.id === id),
     prepareFile: async (id) => files.find((file) => file.id === id),
     ...overrides,
   };

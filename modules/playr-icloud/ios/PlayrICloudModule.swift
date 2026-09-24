@@ -20,12 +20,22 @@ private struct ICloudFileOperationRecord: Record {
   @Field var id: String = ""
   @Field var succeeded: Bool = false
   @Field var error: String?
+  @Field var errorDomain: String?
+  @Field var errorCode: Int?
+  @Field var retryable: Bool = false
 }
 
 private struct ICloudFolderRecord: Record {
   @Field var id: String = ""
   @Field var name: String = ""
   @Field var relativePath: String = ""
+}
+
+private struct ICloudLibrarySnapshot: Record {
+  @Field var files: [ICloudAudioFileRecord] = []
+  @Field var folders: [ICloudFolderRecord] = []
+  @Field var complete: Bool = true
+  @Field var documentsUri: String = ""
 }
 
 private func makeICloudException(_ description: String) -> Exception {
@@ -66,13 +76,7 @@ public final class PlayrICloudModule: Module {
       try guide.write(to: guideURL, atomically: true, encoding: .utf8)
     }
 
-    AsyncFunction("listAudioFilesAsync") {
-      try self.listAudioFiles()
-    }
-
-    AsyncFunction("listFoldersAsync") {
-      try self.listFolders()
-    }
+    AsyncFunction("scanLibraryAsync") { try self.scanLibrary() }
 
     AsyncFunction("createFolderAsync") { (parentPath: String, name: String) in
       let parentURL = try self.folderURL(for: parentPath)
@@ -94,7 +98,7 @@ public final class PlayrICloudModule: Module {
         .appendingPathComponent(folderName, isDirectory: true)
       try self.ensureAvailableDestination(destinationURL, allowing: sourceURL)
       if sourceURL.standardizedFileURL != destinationURL.standardizedFileURL {
-        try FileManager.default.moveItem(at: sourceURL, to: destinationURL)
+        try ICloudFileAccess.move(from: sourceURL, to: destinationURL)
       }
       return try self.folderRecord(for: destinationURL)
     }
@@ -105,7 +109,7 @@ public final class PlayrICloudModule: Module {
       let destinationURL = destinationFolderURL.appendingPathComponent(sourceURL.lastPathComponent)
       try self.ensureAvailableDestination(destinationURL, allowing: sourceURL)
       if sourceURL.standardizedFileURL != destinationURL.standardizedFileURL {
-        try FileManager.default.moveItem(at: sourceURL, to: destinationURL)
+        try ICloudFileAccess.move(from: sourceURL, to: destinationURL)
       }
       let destinationPath = try self.relativePath(for: destinationURL)
       return (try? self.audioFileRecord(for: destinationPath))
@@ -119,7 +123,7 @@ public final class PlayrICloudModule: Module {
           try FileManager.default.startDownloadingUbiquitousItem(at: url)
           return self.operationResult(id: id, succeeded: true)
         } catch {
-          return self.operationResult(id: id, succeeded: false, error: error.localizedDescription)
+          return self.operationResult(id: id, succeeded: false, failure: error as NSError)
         }
       }
     }
@@ -160,48 +164,41 @@ public final class PlayrICloudModule: Module {
           try FileManager.default.evictUbiquitousItem(at: url)
           return self.operationResult(id: id, succeeded: true)
         } catch {
-          return self.operationResult(id: id, succeeded: false, error: error.localizedDescription)
+          return self.operationResult(id: id, succeeded: false, failure: error as NSError)
         }
       }
     }
 
   }
 
-  private func listAudioFiles() throws -> [ICloudAudioFileRecord] {
-    let documentsURL = try documentsURL()
-    let urls = try descendants(of: documentsURL)
-    return urls
-      .filter { supportedAudioExtensions.contains($0.pathExtension.lowercased()) }
-      .map { url in
-        let relativePath = (try? self.relativePath(for: url)) ?? url.lastPathComponent
-        return (try? audioFileRecord(for: relativePath)) ?? fallbackAudioFileRecord(for: url)
-      }
-      .sorted { left, right in
-        left.relativePath.localizedStandardCompare(right.relativePath) == .orderedAscending
-      }
-  }
-
-  private func listFolders() throws -> [ICloudFolderRecord] {
-    let documentsURL = try documentsURL()
-    return try descendants(of: documentsURL)
-      .filter { url in
-        (try? url.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true
-      }
-      .compactMap { try? folderRecord(for: $0) }
-      .sorted {
-        $0.relativePath.localizedStandardCompare($1.relativePath) == .orderedAscending
-      }
-  }
-
-  private func descendants(of rootURL: URL) throws -> [URL] {
+  private func scanLibrary() throws -> ICloudLibrarySnapshot {
+    let root = try documentsURL()
+    var snapshot = ICloudLibrarySnapshot()
+    snapshot.documentsUri = root.absoluteString
     guard let enumerator = FileManager.default.enumerator(
-      at: rootURL,
-      includingPropertiesForKeys: [.isDirectoryKey],
-      options: [.skipsHiddenFiles, .skipsPackageDescendants]
+      at: root, includingPropertiesForKeys: [.isDirectoryKey],
+      options: [.skipsHiddenFiles, .skipsPackageDescendants],
+      errorHandler: { _, _ in snapshot.complete = false; return true }
     ) else {
-      return []
+      snapshot.complete = false
+      return snapshot
     }
-    return enumerator.compactMap { $0 as? URL }
+    for case let url as URL in enumerator {
+      do {
+        if try url.resourceValues(forKeys: [.isDirectoryKey]).isDirectory == true {
+          snapshot.folders.append(try folderRecord(for: url))
+        } else if supportedAudioExtensions.contains(url.pathExtension.lowercased()) {
+          do { snapshot.files.append(try audioFileRecord(for: relativePath(for: url))) }
+          catch {
+            snapshot.files.append(fallbackAudioFileRecord(for: url))
+            snapshot.complete = false
+          }
+        }
+      } catch { snapshot.complete = false }
+    }
+    snapshot.files.sort { $0.relativePath.localizedStandardCompare($1.relativePath) == .orderedAscending }
+    snapshot.folders.sort { $0.relativePath.localizedStandardCompare($1.relativePath) == .orderedAscending }
+    return snapshot
   }
 
   private func documentsURL() throws -> URL {
@@ -359,12 +356,16 @@ public final class PlayrICloudModule: Module {
   private func operationResult(
     id: String,
     succeeded: Bool,
-    error: String? = nil
+    error: String? = nil,
+    failure: NSError? = nil
   ) -> ICloudFileOperationRecord {
     var result = ICloudFileOperationRecord()
     result.id = id
     result.succeeded = succeeded
-    result.error = error
+    result.error = error ?? failure?.localizedDescription
+    result.errorDomain = failure?.domain
+    result.errorCode = failure?.code
+    result.retryable = failure.map(ICloudFileAccess.isRetryable) ?? false
     return result
   }
 }

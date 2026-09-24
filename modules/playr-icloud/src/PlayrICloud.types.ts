@@ -25,4 +25,14 @@ export type ICloudFileOperationResult = {
   id: string;
   succeeded: boolean;
   error: string | null;
+  errorDomain: string | null;
+  errorCode: number | null;
+  retryable: boolean;
+};
+
+export type ICloudLibrarySnapshot = {
+  files: ICloudAudioFile[];
+  folders: ICloudFolder[];
+  complete: boolean;
+  documentsUri: string;
 };

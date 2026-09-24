@@ -37,6 +37,7 @@ public struct PlayrLibraryFolderItemRecord: Record {
 }
 
 public final class PlayrLibraryViewProps: ExpoSwiftUI.ViewProps {
+  @Field var documentsUri: String?
   @Field var title: String = "Library"
   @Field var currentFolderPath: String = ""
   @Field var searchQuery: String = ""
@@ -183,6 +184,8 @@ private struct PlayrFolderCard: View {
     .frame(maxWidth: .infinity, alignment: .leading)
     .contentShape(Rectangle())
     .onTapGesture(perform: onOpen)
+    .accessibilityAddTraits(.isButton)
+    .accessibilityHint("Open folder")
     .dropDestination(for: PlayrAudioDragItem.self) { items, _ in
       let ids = items.map(\.id)
       guard !ids.isEmpty else { return false }
@@ -584,7 +587,7 @@ public struct PlayrLibraryView: ExpoSwiftUI.View, ExpoSwiftUI.WithHostingView {
           .foregroundStyle(.secondary)
         Text("No Results")
           .font(.headline)
-        Text("No audio titles match \"(searchText)\".")
+        Text("No audio titles match \"\(searchText)\".")
           .font(.subheadline)
           .foregroundStyle(.secondary)
       }
@@ -620,6 +623,8 @@ public struct PlayrLibraryView: ExpoSwiftUI.View, ExpoSwiftUI.WithHostingView {
       guard editMode == .inactive, !isRemoving else { return }
       props.onOpenFile(["id": item.id])
     }
+    .accessibilityAddTraits(.isButton)
+    .accessibilityHint("Play or pause episode")
     .contextMenu {
       Button("Add to Queue", systemImage: "text.badge.plus") {
         props.onAddToQueue(["id": item.id])
@@ -627,7 +632,7 @@ public struct PlayrLibraryView: ExpoSwiftUI.View, ExpoSwiftUI.WithHostingView {
       .disabled(props.queuedIds.contains(item.id))
 
       if item.downloadState == "downloaded" && !isRemoving {
-        Button("Remove", systemImage: "trash", role: .destructive) {
+        Button("Remove Download", systemImage: "trash", role: .destructive) {
           props.onRemoveDownloads(["ids": [item.id]])
         }
       }
@@ -656,7 +661,7 @@ public struct PlayrLibraryView: ExpoSwiftUI.View, ExpoSwiftUI.WithHostingView {
         Button(role: .destructive) {
           props.onRemoveDownloads(["ids": [item.id]])
         } label: {
-          Label("Remove", systemImage: "trash")
+          Label("Remove Download", systemImage: "trash")
         }
         .tint(.red)
       }
@@ -751,7 +756,7 @@ public struct PlayrLibraryView: ExpoSwiftUI.View, ExpoSwiftUI.WithHostingView {
           props.onRemoveDownloads(["ids": Array(selection)])
           finishEditing()
         } label: {
-          Label("Remove", systemImage: "trash")
+          Label("Remove Download", systemImage: "trash")
         }
         .disabled(selection.isEmpty)
       }
@@ -770,10 +775,8 @@ public struct PlayrLibraryView: ExpoSwiftUI.View, ExpoSwiftUI.WithHostingView {
   }
 
   private func shareURL(for relativePath: String) -> URL? {
-    FileManager.default
-      .url(forUbiquityContainerIdentifier: nil)?
-      .appendingPathComponent("Documents", isDirectory: true)
-      .appendingPathComponent(relativePath)
+    guard let uri = props.documentsUri, let documentsURL = URL(string: uri) else { return nil }
+    return documentsURL.appendingPathComponent(relativePath)
   }
 
   private func parentFolderPath(_ path: String) -> String {
@@ -806,8 +809,10 @@ public struct PlayrQueueView: ExpoSwiftUI.View, ExpoSwiftUI.WithHostingView {
     NavigationStack {
       List {
         if props.files.isEmpty && props.continuationFiles.isEmpty {
-          ContentUnavailableView("Nothing up next", systemImage: "text.badge.plus",
-            description: Text("Play from your library or add episodes to the queue."))
+          VStack(spacing: 10) {
+            Text("Nothing up next").font(.headline)
+            Text("Play from your library or add episodes to the queue.").foregroundStyle(.secondary)
+          }.padding(.vertical, 36).frame(maxWidth: .infinity)
         }
         if !props.files.isEmpty {
           Section("Next in Queue") { rows(props.files, queued: true) }

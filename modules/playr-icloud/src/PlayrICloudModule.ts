@@ -5,13 +5,13 @@ import type {
   ICloudAvailability,
   ICloudFileOperationResult,
   ICloudFolder,
+  ICloudLibrarySnapshot,
 } from './PlayrICloud.types';
 
 declare class PlayrICloudModule extends NativeModule<{}> {
   getAvailabilityAsync(): Promise<ICloudAvailability>;
   ensureLibraryAsync(): Promise<void>;
-  listAudioFilesAsync(): Promise<ICloudAudioFile[]>;
-  listFoldersAsync(): Promise<ICloudFolder[]>;
+  scanLibraryAsync(): Promise<ICloudLibrarySnapshot>;
   getAudioFilesAsync(ids: string[]): Promise<ICloudAudioFile[]>;
   requestDownloadsAsync(ids: string[]): Promise<ICloudFileOperationResult[]>;
   removeDownloadsAsync(ids: string[]): Promise<ICloudFileOperationResult[]>;

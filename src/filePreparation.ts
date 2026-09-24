@@ -12,12 +12,12 @@ export function createFilePreparation({ verify, request, wait = () => new Promis
   async function prepare(id: string) {
     let file = await verify(id);
     if (!file) throw new Error('This file is no longer in the Playr iCloud folder.');
-    if (file.downloadState === 'downloaded' && file.localUri) return file;
-    if (file.downloadState === 'inCloud') await request(id);
+    if (file.metadataAvailable && file.downloadState === 'downloaded' && file.localUri) return file;
+    if (file.metadataAvailable && file.downloadState === 'inCloud') await request(id);
     for (let attempt = 0; attempt < 180; attempt += 1) {
       await wait();
       file = await verify(id);
-      if (file?.downloadState === 'downloaded' && file.localUri) return file;
+      if (file?.metadataAvailable && file.downloadState === 'downloaded' && file.localUri) return file;
     }
     throw new Error('The iCloud download is taking longer than expected. You can retry; the transfer may continue in the background.');
   }

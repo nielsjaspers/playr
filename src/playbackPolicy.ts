@@ -46,4 +46,3 @@ export function resolveResumePosition(
   if (!rememberTimestamp || progress?.completedAt != null) return 0;
   return Math.max(0, Math.min(progress?.position ?? 0, progress?.duration ?? 0));
 }
-
