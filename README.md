@@ -12,21 +12,39 @@ bun run typecheck
 bun test
 ```
 
-To generate and build the native app locally:
+### Build with your Apple team
+
+Playr uses a native iCloud module and requires a native build. To test iCloud, use a signed build on a device with iCloud Drive enabled.
+
+In your Apple Developer account, register an explicit App ID for your bundle identifier and enable iCloud. Create or choose an iCloud container in the same team and associate it with that App ID. [Apple's iCloud capability setup](https://developer.apple.com/help/account/identifiers/enable-app-capabilities/)
+
+Create `.env.local` in the repository root and replace these example values with your own:
+
+```dotenv
+PLAYR_APPLE_TEAM_ID=ABCDE12345
+PLAYR_BUNDLE_IDENTIFIER=com.example.playr
+PLAYR_ICLOUD_CONTAINER=iCloud.com.example.playr
+```
+
+Set all three values together. Expo uses them to generate the Xcode signing team, bundle identifier, iCloud entitlements, and `Info.plist`. With all three unset, Expo uses the original Playr identifiers and leaves team selection to Xcode.
+
+Generate the native project and install its pods. Use `--clean` when changing these values to regenerate the ignored `ios/` directory.
 
 ```sh
 bunx expo prebuild --platform ios --no-install
 cd ios
 pod install
 cd ..
-bun run ios
+open ios/Playr.xcworkspace
 ```
 
-`bun run ios` installs and launches the app on the selected simulator or device. Use an isolated simulator for development. Do not install a development build over a daily-use installation unless you intend to replace it.
+In Xcode, select the Playr target and check Signing & Capabilities. Use your Apple team and a development provisioning profile for your App ID with iCloud Documents access to your container.
+
+Start Metro with `bun run start`. In Xcode, select your test device and run Playr. Open Files, add a test audio file to the Playr folder in iCloud Drive, and check that Playr can list and play it.
+
+For simulator development, run `bun run ios --device` and select an isolated simulator. A device build signed with the original Playr identity can replace a daily-use installation.
 
 If Xcode is installed but `xcodebuild` resolves to Command Line Tools, select Xcode in its Settings > Locations panel, or set `DEVELOPER_DIR` for the command to your Xcode installation's `Contents/Developer` directory.
-
-The native iCloud module requires a native build. Expo Go cannot load it. Real iCloud checks require an entitled, signed build and an iCloud account. The app's existing bundle identifier and entitlements are in `app.json`; configure your own signing and iCloud container when using another account.
 
 ## Playback behavior
 
@@ -66,3 +84,7 @@ Before using a new native build with a real library, verify on a test device or 
 6. Check the final queue row above the mini-player, VoiceOver actions, and large text. Keep controls visible during downloads.
 
 Native sources are under `modules/playr-icloud/ios`. Expo generates the ignored `ios` directory; make persistent native changes in the module or config plugin.
+
+## License
+
+Playr code is available under the [MIT License](LICENSE). The Expo template and other Expo-derived material retain the Expo copyright notice.
